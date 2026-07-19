@@ -2,6 +2,7 @@ package im.status.keycard;
 
 import javacard.framework.*;
 import javacard.security.*;
+import javacardx.crypto.Cipher;
 
 import static im.status.keycard.SecureChannelV2.PUBKEY_SIZE;
 import static im.status.keycard.SecureChannelV2.SC_MAX_RESPONSE_LENGTH;
@@ -40,6 +41,9 @@ public class KeycardApplet extends Applet {
   static final byte CLONE_P1_VERIFY_PEER = 0x01;
   static final byte CLONE_P1_EXPORT = 0x02;
   static final short CLONE_PUBKEY_LEN = 65;
+  static final short CLONE_NONCE_LEN = 16;
+  static final short CLONE_SEED_LEN = 64;   // masterPrivate(32) || masterChainCode(32)
+  static final byte[] CLONE_LABEL = { 'A', 'N', 'T', 'F', 'U', 'N', '-', 'C', 'L', 'O', 'N', 'E', '-', 'v', '1' };
 
   static final short SW_REFERENCED_DATA_NOT_FOUND = (short) 0x6A88;
 
@@ -154,6 +158,10 @@ public class KeycardApplet extends Applet {
 
   private ECPublicKey caPublicKey;
   private ECPrivateKey ephemeralPriv;
+  private AESKey cloneAesKey;
+  private Cipher cloneAesCbc;
+  private byte[] cloneScratch;
+  private byte[] cloneZeroIv;
 
   private Crypto crypto;
   private SECP256k1 secp256k1;
@@ -197,6 +205,11 @@ public class KeycardApplet extends Applet {
 
     ephemeralPriv = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, SECP256k1.SECP256K1_KEY_SIZE, false);
     SECP256k1.setCurveParameters(ephemeralPriv);
+
+    cloneAesKey = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES_TRANSIENT_DESELECT, KeyBuilder.LENGTH_AES_128, false);
+    cloneAesCbc = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
+    cloneScratch = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_DESELECT);
+    cloneZeroIv = new byte[16];
 
     masterChainCode = new byte[CHAIN_CODE_SIZE];
     altChainCode = new byte[CHAIN_CODE_SIZE];
@@ -1017,20 +1030,39 @@ public class KeycardApplet extends Applet {
         }
         break;
       case CLONE_P1_EXPORT: {
-        if (len <= CLONE_PUBKEY_LEN) {
+        // input = nonce(16) || peerPubkey(65) || CA signature
+        short peerOff = (short) (OFFSET_CDATA + CLONE_NONCE_LEN);
+        short sigOff = (short) (peerOff + CLONE_PUBKEY_LEN);
+        if (len <= (short) (CLONE_NONCE_LEN + CLONE_PUBKEY_LEN)) {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
-        // Authenticate the peer's DAK certificate in-chip before producing anything
+        if (!masterPrivate.isInitialized()) {
+          ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
+        // 1) Authenticate the peer's DAK certificate in-chip
         crypto.ecdsa.init(caPublicKey, Signature.MODE_VERIFY);
-        if (!crypto.ecdsa.verify(apduBuffer, OFFSET_CDATA, CLONE_PUBKEY_LEN,
-                                 apduBuffer, (short) (OFFSET_CDATA + CLONE_PUBKEY_LEN), (short) (len - CLONE_PUBKEY_LEN))) {
+        if (!crypto.ecdsa.verify(apduBuffer, peerOff, CLONE_PUBKEY_LEN,
+                                 apduBuffer, sigOff, (short) (len - CLONE_NONCE_LEN - CLONE_PUBKEY_LEN))) {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
-        // Fresh ephemeral keypair; return the ephemeral public key (e_A_pub)
+        // 2) Fresh ephemeral keypair
         crypto.random.generateData(derivationOutput, (short) 0, (short) 32);
         ephemeralPriv.setS(derivationOutput, (short) 0, (short) 32);
+        // 3) ECDH(e_A, peerPub) -> shared X (32) at cloneScratch[0]
+        crypto.ecdh.init(ephemeralPriv);
+        crypto.ecdh.generateSecret(apduBuffer, peerOff, CLONE_PUBKEY_LEN, cloneScratch, (short) 0);
+        // 4) HKDF-SHA256(salt=nonce, ikm=sharedX, info=CLONE_LABEL) -> OKM(32) at cloneScratch[32]
+        crypto.hkdf(apduBuffer, OFFSET_CDATA, CLONE_NONCE_LEN, cloneScratch, (short) 0, (short) 32,
+                    CLONE_LABEL, (short) 0, (short) CLONE_LABEL.length, cloneScratch, (short) 32);
+        cloneAesKey.setKey(cloneScratch, (short) 32);
+        // 5) plaintext = masterPrivate(32) || masterChainCode(32) at cloneScratch[64]
+        masterPrivate.getS(cloneScratch, (short) 64);
+        Util.arrayCopyNonAtomic(masterChainCode, (short) 0, cloneScratch, (short) 96, CHAIN_CODE_SIZE);
+        // 6) response = e_A_pub(65) || AES-CBC(zeroIV) ciphertext(64)
         short ephLen = secp256k1.derivePublicKey(ephemeralPriv, apduBuffer, OFFSET_CDATA);
-        apdu.setOutgoingAndSend(OFFSET_CDATA, ephLen);
+        cloneAesCbc.init(cloneAesKey, Cipher.MODE_ENCRYPT, cloneZeroIv, (short) 0, (short) 16);
+        short ctLen = cloneAesCbc.doFinal(cloneScratch, (short) 64, CLONE_SEED_LEN, apduBuffer, (short) (OFFSET_CDATA + ephLen));
+        apdu.setOutgoingAndSend(OFFSET_CDATA, (short) (ephLen + ctLen));
         break;
       }
       default:

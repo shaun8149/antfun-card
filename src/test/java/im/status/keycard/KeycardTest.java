@@ -1600,41 +1600,75 @@ public class KeycardTest {
   }
 
   @Test
-  @DisplayName("CLONE EXPORT: after verifying the peer cert, return a fresh ephemeral public key")
-  void cloneExportReturnsEphemeralPubkeyTest() throws Exception {
-    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
-    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
-    BigInteger peerPriv = new BigInteger("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 16);
-    ECPublicKey peerPub = (ECPublicKey) kf.generatePublic(
-        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(peerPriv), spec));
-    byte[] peerPubBytes = peerPub.getQ().getEncoded(false);
+  @DisplayName("CLONE EXPORT end-to-end: peer B (played by the test) recovers card A's master key")
+  void cloneExportEndToEndTest() throws Exception {
+    // --- Card A: open secure channel, verify PIN, generate a master key; capture its key UID ---
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    APDUResponse gen = cmdSet.generateKey();
+    assertEquals(0x9000, gen.getSw());
+    byte[] keyUID = gen.getData(); // sha256(uncompressed master public key)
 
-    Signature caSigner = Signature.getInstance("SHA256withECDSA", "BC");
-    caSigner.initSign(caKeyPair.getPrivate());
-    caSigner.update(peerPubBytes);
-    byte[] caSig = caSigner.sign();
-
+    // --- Provision the CA public key into A ---
     byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false);
     assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes)).getSw());
 
-    byte[] cert = new byte[peerPubBytes.length + caSig.length];
-    System.arraycopy(peerPubBytes, 0, cert, 0, peerPubBytes.length);
-    System.arraycopy(caSig, 0, cert, peerPubBytes.length, caSig.length);
+    // --- Peer B keypair + DAK certificate (peerPub signed by the CA) ---
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+    BigInteger bPriv = new BigInteger("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 16);
+    ECPublicKey bPub = (ECPublicKey) kf.generatePublic(
+        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(bPriv), spec));
+    byte[] bPubBytes = bPub.getQ().getEncoded(false);
+    Signature caSigner = Signature.getInstance("SHA256withECDSA", "BC");
+    caSigner.initSign(caKeyPair.getPrivate());
+    caSigner.update(bPubBytes);
+    byte[] caSig = caSigner.sign();
 
-    APDUResponse export = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, cert));
+    byte[] nonce = new byte[16];
+    for (int i = 0; i < 16; i++) nonce[i] = (byte) (0xB0 + i);
+
+    // CLONE_EXPORT input = nonce(16) || peerPub(65) || CA signature
+    byte[] in = new byte[16 + bPubBytes.length + caSig.length];
+    System.arraycopy(nonce, 0, in, 0, 16);
+    System.arraycopy(bPubBytes, 0, in, 16, bPubBytes.length);
+    System.arraycopy(caSig, 0, in, 16 + bPubBytes.length, caSig.length);
+
+    APDUResponse export = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in));
     assertEquals(0x9000, export.getSw());
-    byte[] eph = export.getData();
-    assertEquals(65, eph.length);              // uncompressed secp256k1 point
-    assertEquals(0x04, eph[0] & 0xFF);
-    spec.getCurve().decodePoint(eph);          // throws if not a valid curve point
+    byte[] out = export.getData();
+    assertEquals(65 + 64, out.length); // e_A_pub(65) || ciphertext(64)
+    byte[] eaPub = Arrays.copyOfRange(out, 0, 65);
+    byte[] ct = Arrays.copyOfRange(out, 65, 129);
 
-    // Two exports must yield DIFFERENT ephemeral keys (freshness)
-    byte[] eph2 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, cert)).getData();
-    assertFalse(Arrays.equals(eph, eph2));
+    // --- Card B (played by the test): ECDH(bPriv, e_A_pub) -> shared X ---
+    org.bouncycastle.math.ec.ECPoint shared = spec.getCurve().decodePoint(eaPub).multiply(bPriv).normalize();
+    byte[] x = Numeric.toBytesPadded(shared.getAffineXCoord().toBigInteger(), 32);
 
-    // A forged cert must be rejected before any ephemeral key is produced
-    byte[] forged = cert.clone();
-    forged[forged.length - 1] ^= 0x01;
-    assertEquals(0x6A80, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, forged)).getSw());
+    // HKDF-SHA256(salt=nonce, ikm=X, info="ANTFUN-CLONE-v1") -> OKM[0..16] = AES key
+    byte[] okm = hkdfSha256(nonce, x, "ANTFUN-CLONE-v1".getBytes(), 32);
+    byte[] aesKey = Arrays.copyOfRange(okm, 0, 16);
+
+    // AES-CBC (zero IV) decrypt -> masterPriv(32) || chainCode(32)
+    javax.crypto.Cipher aes = javax.crypto.Cipher.getInstance("AES/CBC/NoPadding", "BC");
+    aes.init(javax.crypto.Cipher.DECRYPT_MODE, new javax.crypto.spec.SecretKeySpec(aesKey, "AES"),
+             new javax.crypto.spec.IvParameterSpec(new byte[16]));
+    byte[] pt = aes.doFinal(ct);
+    byte[] masterPriv = Arrays.copyOfRange(pt, 0, 32);
+
+    // Derive the master public key from the recovered private key; its sha256 must equal A's key UID
+    byte[] recoveredPub = spec.getG().multiply(new BigInteger(1, masterPriv)).normalize().getEncoded(false);
+    assertArrayEquals(keyUID, sha256(recoveredPub),
+        "peer B must recover the same master key as card A");
+  }
+
+  private static byte[] hkdfSha256(byte[] salt, byte[] ikm, byte[] info, int len) throws Exception {
+    javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+    mac.init(new javax.crypto.spec.SecretKeySpec(salt, "HmacSHA256"));
+    byte[] prk = mac.doFinal(ikm);
+    mac.init(new javax.crypto.spec.SecretKeySpec(prk, "HmacSHA256"));
+    mac.update(info);
+    mac.update((byte) 0x01);
+    return Arrays.copyOfRange(mac.doFinal(), 0, len);
   }
 }
