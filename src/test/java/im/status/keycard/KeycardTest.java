@@ -59,6 +59,7 @@ public class KeycardTest {
   private static CardSimulator simulator;
   private static KeyPair caKeyPair;
   private static Certificate identCert;
+  private static KeyPair identKeyPair;
 
   private TestKeycardCommandSet cmdSet;
 
@@ -207,7 +208,7 @@ public class KeycardTest {
     // the (tiny, pre-existing) odds of hitting that edge case the same as before per-test isolation
     // was introduced, instead of multiplying them by the number of tests.
     if (identCert == null) {
-      KeyPair identKeyPair = Certificate.generateIdentKeyPair();
+      identKeyPair = Certificate.generateIdentKeyPair();
       identCert = Certificate.createCertificate(caKeyPair, identKeyPair);
     }
     IdentCommandSet idCmdSet = new IdentCommandSet(sdkChannel);
@@ -1705,6 +1706,100 @@ public class KeycardTest {
     assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in)).getSw());
     // Same nonce again -> rejected
     assertEquals(0x6A80, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in)).getSw());
+  }
+
+  @Test
+  @DisplayName("CLONE IMPORT round-trip: applet imports a master key sent by peer A")
+  void cloneImportRoundTripTest() throws Exception {
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+
+    // A known master key (masterPriv || chainCode) that peer A will send
+    byte[] masterPriv = new byte[32];
+    byte[] chainCode = new byte[32];
+    for (int i = 0; i < 32; i++) { masterPriv[i] = (byte) (0x11 + i); chainCode[i] = (byte) (0x80 + i); }
+    byte[] seed = new byte[64];
+    System.arraycopy(masterPriv, 0, seed, 0, 32);
+    System.arraycopy(chainCode, 0, seed, 32, 32);
+
+    // Peer A ephemeral key; ECDH against the applet's device PUBLIC key (test knows identKeyPair)
+    BigInteger aEph = new BigInteger("0a0b0c0d0e0f000102030405060708090a0b0c0d0e0f00010203040506070809", 16);
+    byte[] aEphPub = spec.getG().multiply(aEph).normalize().getEncoded(false);
+    org.bouncycastle.jce.interfaces.ECPublicKey devPub = (org.bouncycastle.jce.interfaces.ECPublicKey) identKeyPair.getPublic();
+    org.bouncycastle.math.ec.ECPoint shared = devPub.getQ().multiply(aEph).normalize();
+    byte[] x = Numeric.toBytesPadded(shared.getAffineXCoord().toBigInteger(), 32);
+
+    byte[] nonce = new byte[16];
+    for (int i = 0; i < 16; i++) nonce[i] = (byte) (0xD0 + i);
+    byte[] okm = hkdfSha256(nonce, x, "ANTFUN-CLONE-v1".getBytes(), 32);
+    byte[] encKey = Arrays.copyOfRange(okm, 0, 16);
+    byte[] macKey = Arrays.copyOfRange(okm, 16, 32);
+
+    javax.crypto.Cipher aes = javax.crypto.Cipher.getInstance("AES/CBC/NoPadding", "BC");
+    aes.init(javax.crypto.Cipher.ENCRYPT_MODE, new javax.crypto.spec.SecretKeySpec(encKey, "AES"),
+             new javax.crypto.spec.IvParameterSpec(new byte[16]));
+    byte[] ct = aes.doFinal(seed);
+    byte[] tag = Arrays.copyOfRange(hmacSha256(macKey, ct), 0, 16);
+
+    byte[] in = new byte[16 + 65 + 64 + 16];
+    System.arraycopy(nonce, 0, in, 0, 16);
+    System.arraycopy(aEphPub, 0, in, 16, 65);
+    System.arraycopy(ct, 0, in, 81, 64);
+    System.arraycopy(tag, 0, in, 145, 16);
+
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x03, 0x00, in)).getSw());
+
+    // The applet must now hold that master key: its key UID = sha256(uncompressed master pub)
+    byte[] expectedPub = spec.getG().multiply(new BigInteger(1, masterPriv)).normalize().getEncoded(false);
+    byte[] info = cmdSet.select().checkOK().getData();
+    byte[] uid = new ApplicationInfo(info).getKeyUID();
+    assertArrayEquals(sha256(expectedPub), uid, "applet must control the imported master key");
+  }
+
+  @Test
+  @DisplayName("CLONE IMPORT: reject a tampered ciphertext")
+  void cloneImportRejectsTamperedCtTest() throws Exception {
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+
+    // A known master key (masterPriv || chainCode) that peer A will send
+    byte[] masterPriv = new byte[32];
+    byte[] chainCode = new byte[32];
+    for (int i = 0; i < 32; i++) { masterPriv[i] = (byte) (0x11 + i); chainCode[i] = (byte) (0x80 + i); }
+    byte[] seed = new byte[64];
+    System.arraycopy(masterPriv, 0, seed, 0, 32);
+    System.arraycopy(chainCode, 0, seed, 32, 32);
+
+    // Peer A ephemeral key; ECDH against the applet's device PUBLIC key (test knows identKeyPair)
+    BigInteger aEph = new BigInteger("0a0b0c0d0e0f000102030405060708090a0b0c0d0e0f00010203040506070809", 16);
+    byte[] aEphPub = spec.getG().multiply(aEph).normalize().getEncoded(false);
+    org.bouncycastle.jce.interfaces.ECPublicKey devPub = (org.bouncycastle.jce.interfaces.ECPublicKey) identKeyPair.getPublic();
+    org.bouncycastle.math.ec.ECPoint shared = devPub.getQ().multiply(aEph).normalize();
+    byte[] x = Numeric.toBytesPadded(shared.getAffineXCoord().toBigInteger(), 32);
+
+    byte[] nonce = new byte[16];
+    for (int i = 0; i < 16; i++) nonce[i] = (byte) (0xD0 + i);
+    byte[] okm = hkdfSha256(nonce, x, "ANTFUN-CLONE-v1".getBytes(), 32);
+    byte[] encKey = Arrays.copyOfRange(okm, 0, 16);
+    byte[] macKey = Arrays.copyOfRange(okm, 16, 32);
+
+    javax.crypto.Cipher aes = javax.crypto.Cipher.getInstance("AES/CBC/NoPadding", "BC");
+    aes.init(javax.crypto.Cipher.ENCRYPT_MODE, new javax.crypto.spec.SecretKeySpec(encKey, "AES"),
+             new javax.crypto.spec.IvParameterSpec(new byte[16]));
+    byte[] ct = aes.doFinal(seed);
+    byte[] tag = Arrays.copyOfRange(hmacSha256(macKey, ct), 0, 16);
+
+    byte[] in = new byte[16 + 65 + 64 + 16];
+    System.arraycopy(nonce, 0, in, 0, 16);
+    System.arraycopy(aEphPub, 0, in, 16, 65);
+    System.arraycopy(ct, 0, in, 81, 64);
+    System.arraycopy(tag, 0, in, 145, 16);
+
+    in[81] ^= 0x01; // corrupt first ciphertext byte
+
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x6A80, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x03, 0x00, in)).getSw());
   }
 
   private static byte[] hkdfSha256(byte[] salt, byte[] ikm, byte[] info, int len) throws Exception {

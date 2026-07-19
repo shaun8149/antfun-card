@@ -40,6 +40,7 @@ public class KeycardApplet extends Applet {
   static final byte CLONE_P1_SET_CA = 0x00;
   static final byte CLONE_P1_VERIFY_PEER = 0x01;
   static final byte CLONE_P1_EXPORT = 0x02;
+  static final byte CLONE_P1_IMPORT = 0x03;
   static final short CLONE_PUBKEY_LEN = 65;
   static final short CLONE_NONCE_LEN = 16;
   static final short CLONE_SEED_LEN = 64;   // masterPrivate(32) || masterChainCode(32)
@@ -1090,6 +1091,42 @@ public class KeycardApplet extends Applet {
         crypto.hmacSHA256(cloneScratch, (short) 48, (short) 16, apduBuffer, ctOff, ctLen, derivationOutput, (short) 0);
         Util.arrayCopyNonAtomic(derivationOutput, (short) 0, apduBuffer, (short) (ctOff + ctLen), CLONE_TAG_LEN);
         apdu.setOutgoingAndSend(OFFSET_CDATA, (short) (ephLen + ctLen + CLONE_TAG_LEN));
+        break;
+      }
+      case CLONE_P1_IMPORT: {
+        // input = nonce(16) || e_A_pub(65) || ct(64) || tag(16)
+        short ephOff = (short) (OFFSET_CDATA + CLONE_NONCE_LEN);
+        short ctOff = (short) (ephOff + CLONE_PUBKEY_LEN);
+        short tagOff = (short) (ctOff + CLONE_SEED_LEN);
+        if (len != (short) (CLONE_NONCE_LEN + CLONE_PUBKEY_LEN + CLONE_SEED_LEN + CLONE_TAG_LEN)) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        // 1) ECDH(device private key, e_A_pub) -> shared X at cloneScratch[0]
+        crypto.ecdh.init(SharedMemory.idPrivate);
+        crypto.ecdh.generateSecret(apduBuffer, ephOff, CLONE_PUBKEY_LEN, cloneScratch, (short) 0);
+        // 2) HKDF -> OKM(32) at cloneScratch[32]; encKey=OKM[0..16], macKey=OKM[16..32]
+        crypto.hkdf(apduBuffer, OFFSET_CDATA, CLONE_NONCE_LEN, cloneScratch, (short) 0, (short) 32,
+                    CLONE_LABEL, (short) 0, (short) CLONE_LABEL.length, cloneScratch, (short) 32);
+        // 3) verify tag = HMAC-SHA256(macKey, ct)[0..16]
+        crypto.hmacSHA256(cloneScratch, (short) 48, (short) 16, apduBuffer, ctOff, CLONE_SEED_LEN, derivationOutput, (short) 0);
+        if (Util.arrayCompare(derivationOutput, (short) 0, apduBuffer, tagOff, CLONE_TAG_LEN) != 0) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        // 4) AES-CBC decrypt ct -> masterPriv(32) || chainCode(32) at cloneScratch[64]
+        cloneAesKey.setKey(cloneScratch, (short) 32);
+        cloneAesCbc.init(cloneAesKey, Cipher.MODE_DECRYPT, cloneZeroIv, (short) 0, (short) 16);
+        cloneAesCbc.doFinal(apduBuffer, ctOff, CLONE_SEED_LEN, cloneScratch, (short) 64);
+        // 5) build a TLV_KEY_TEMPLATE at OFFSET_CDATA and loadKeyPair (priv + chain code)
+        short o = OFFSET_CDATA;
+        apduBuffer[o++] = TLV_KEY_TEMPLATE;
+        apduBuffer[o++] = (byte) (2 + 32 + 2 + CHAIN_CODE_SIZE);
+        apduBuffer[o++] = TLV_PRIV_KEY;
+        apduBuffer[o++] = (byte) 32;
+        Util.arrayCopyNonAtomic(cloneScratch, (short) 64, apduBuffer, o, (short) 32); o += 32;
+        apduBuffer[o++] = TLV_CHAIN_CODE;
+        apduBuffer[o++] = (byte) CHAIN_CODE_SIZE;
+        Util.arrayCopyNonAtomic(cloneScratch, (short) 96, apduBuffer, o, CHAIN_CODE_SIZE); o += CHAIN_CODE_SIZE;
+        loadKeyPair(apduBuffer);
         break;
       }
       default:
