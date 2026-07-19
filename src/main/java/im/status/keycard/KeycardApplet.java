@@ -163,6 +163,7 @@ public class KeycardApplet extends Applet {
   private Cipher cloneAesCbc;
   private byte[] cloneScratch;
   private byte[] cloneZeroIv;
+  private byte[] lastCloneNonce;
 
   private Crypto crypto;
   private SECP256k1 secp256k1;
@@ -211,6 +212,7 @@ public class KeycardApplet extends Applet {
     cloneAesCbc = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
     cloneScratch = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_DESELECT);
     cloneZeroIv = new byte[16];
+    lastCloneNonce = new byte[CLONE_NONCE_LEN];
 
     masterChainCode = new byte[CHAIN_CODE_SIZE];
     altChainCode = new byte[CHAIN_CODE_SIZE];
@@ -259,6 +261,24 @@ public class KeycardApplet extends Applet {
     apdu.setIncomingAndReceive();
     byte[] apduBuffer = apdu.getBuffer();
 
+    // INS_CLONE is always a plaintext/unsecured command (never routed through processSecured), so its
+    // errors must always surface as a plain ISO7816 SW. It is handled outside the shared try/catch below
+    // because that catch's handleException()/shouldRespond() routes errors through the encrypted secure
+    // channel envelope (SecureChannelV2.respond(), whose SW is always 0x9000) whenever a secure channel
+    // happens to be open for an unrelated session (e.g. PIN verification) at the time of the CLONE call.
+    if (apduBuffer[ISO7816.OFFSET_INS] == INS_CLONE) {
+      try {
+        clone(apdu);
+      } catch (ISOException sw) {
+        ISOException.throwIt(sw.getReason());
+      } catch (CryptoException ce) {
+        ISOException.throwIt((short) (ISO7816.SW_UNKNOWN | ce.getReason()));
+      } catch (Exception e) {
+        ISOException.throwIt(ISO7816.SW_UNKNOWN);
+      }
+      return;
+    }
+
     try {
       switch (apduBuffer[ISO7816.OFFSET_INS]) {
         case SecureChannelV2.INS_OPEN_SECURE_CHANNEL:
@@ -270,9 +290,6 @@ public class KeycardApplet extends Applet {
           break;
       case INS_FACTORY_RESET:
           factoryReset(apdu);
-          return;
-        case INS_CLONE:
-          clone(apdu);
           return;
         default:
           ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
@@ -1046,6 +1063,11 @@ public class KeycardApplet extends Applet {
                                  apduBuffer, sigOff, (short) (len - CLONE_NONCE_LEN - CLONE_PUBKEY_LEN))) {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
+        // Anti-replay: reject a nonce equal to the previous one, then record it
+        if (Util.arrayCompare(apduBuffer, OFFSET_CDATA, lastCloneNonce, (short) 0, CLONE_NONCE_LEN) == 0) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        Util.arrayCopy(apduBuffer, OFFSET_CDATA, lastCloneNonce, (short) 0, CLONE_NONCE_LEN);
         // 2) Fresh ephemeral keypair
         crypto.random.generateData(derivationOutput, (short) 0, (short) 32);
         ephemeralPriv.setS(derivationOutput, (short) 0, (short) 32);

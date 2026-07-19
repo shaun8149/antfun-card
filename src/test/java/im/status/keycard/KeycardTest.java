@@ -1676,6 +1676,37 @@ public class KeycardTest {
     assertArrayEquals(keyUID, sha256(recoveredPub), "peer B must recover the same master key as card A");
   }
 
+  @Test
+  @DisplayName("CLONE EXPORT: reject a reused nonce (anti-replay)")
+  void cloneExportRejectsReusedNonceTest() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+    byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false);
+    assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes)).getSw());
+
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+    BigInteger bPriv = new BigInteger("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 16);
+    byte[] bPubBytes = ((ECPublicKey) kf.generatePublic(
+        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(bPriv), spec))).getQ().getEncoded(false);
+    Signature caSigner = Signature.getInstance("SHA256withECDSA", "BC");
+    caSigner.initSign(caKeyPair.getPrivate());
+    caSigner.update(bPubBytes);
+    byte[] caSig = caSigner.sign();
+
+    byte[] nonce = new byte[16];
+    for (int i = 0; i < 16; i++) nonce[i] = (byte) (0xC0 + i);
+    byte[] in = new byte[16 + bPubBytes.length + caSig.length];
+    System.arraycopy(nonce, 0, in, 0, 16);
+    System.arraycopy(bPubBytes, 0, in, 16, bPubBytes.length);
+    System.arraycopy(caSig, 0, in, 16 + bPubBytes.length, caSig.length);
+
+    assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in)).getSw());
+    // Same nonce again -> rejected
+    assertEquals(0x6A80, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in)).getSw());
+  }
+
   private static byte[] hkdfSha256(byte[] salt, byte[] ikm, byte[] info, int len) throws Exception {
     javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
     mac.init(new javax.crypto.spec.SecretKeySpec(salt, "HmacSHA256"));
