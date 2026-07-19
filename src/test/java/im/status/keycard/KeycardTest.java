@@ -1680,7 +1680,19 @@ public class KeycardTest {
   @Test
   @DisplayName("CLONE EXPORT: requires PIN verification")
   void cloneExportRequiresPinTest() throws Exception {
-    // Fresh applet (per @BeforeEach isolation): PIN is set but NOT verified in this session.
+    // First establish that a master key EXISTS and persists across a reset, so that the only
+    // condition distinguishing this session from a successful export is the PIN. Otherwise a
+    // 0x6985 here could just as well come from the pre-existing masterPrivate.isInitialized()
+    // check, and the test would pass even if the PIN guard were deleted.
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+
+    // Power-cycle the simulator: this de-validates the PIN (OwnerPIN.isValidated resets on
+    // reset), but the master key persists in EEPROM. Re-select without re-verifying the PIN.
+    reset();
+    cmdSet.select();
+
     byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false);
     assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes)).getSw());
 
@@ -1699,8 +1711,20 @@ public class KeycardTest {
     System.arraycopy(bPubBytes, 0, in, 16, bPubBytes.length);
     System.arraycopy(caSig, 0, in, 16 + bPubBytes.length, caSig.length);
 
-    // No verifyPIN in this session -> export must be refused.
+    // No verifyPIN in this (post-reset) session, but the master key IS initialized -> the
+    // 0x6985 below can only come from the PIN guard.
     APDUResponse r = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in));
+    assertEquals(0x6985, r.getSw()); // SW_CONDITIONS_NOT_SATISFIED
+  }
+
+  @Test
+  @DisplayName("CLONE IMPORT: requires PIN verification")
+  void cloneImportRequiresPinTest() throws Exception {
+    // Fresh applet (per @BeforeEach isolation): PIN is set but NOT verified in this session.
+    // The PIN guard is the very first statement in CLONE_P1_IMPORT (before the length check),
+    // so even a short/dummy payload must be refused with 0x6985 purely on account of the PIN.
+    byte[] in = new byte[8];
+    APDUResponse r = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x03, 0x00, in));
     assertEquals(0x6985, r.getSw()); // SW_CONDITIONS_NOT_SATISFIED
   }
 
