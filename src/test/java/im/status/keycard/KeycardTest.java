@@ -1534,4 +1534,68 @@ public class KeycardTest {
   private void verifyKeyUID(byte[] keyUID, byte[] pubKey) {
     assertArrayEquals(sha256(pubKey), keyUID);
   }
+
+  @Test
+  @DisplayName("CLONE: verify a peer DAK certificate in-chip against the provisioned CA")
+  void cloneVerifyPeerCertTest() throws Exception {
+    // A peer card's device (DAK) keypair on secp256k1
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+    BigInteger peerPriv = new BigInteger("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 16);
+    ECPublicKey peerPub = (ECPublicKey) kf.generatePublic(
+        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(peerPriv), spec));
+    byte[] peerPubBytes = peerPub.getQ().getEncoded(false); // 65-byte uncompressed
+
+    // CA signs the peer's pubkey -> the DAK certificate signature (DER ECDSA over SHA256(peerPub))
+    Signature caSigner = Signature.getInstance("SHA256withECDSA", "BC");
+    caSigner.initSign(caKeyPair.getPrivate());
+    caSigner.update(peerPubBytes);
+    byte[] caSig = caSigner.sign();
+
+    byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false); // 65-byte uncompressed
+
+    // Provision the CA public key into the applet (spike: via command; production: at perso)
+    APDUResponse setCa = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes));
+    assertEquals(0x9000, setCa.getSw());
+
+    // Certificate = peerPubkey(65) || CA signature(DER); the applet must verify it in-chip
+    byte[] cert = new byte[peerPubBytes.length + caSig.length];
+    System.arraycopy(peerPubBytes, 0, cert, 0, peerPubBytes.length);
+    System.arraycopy(caSig, 0, cert, peerPubBytes.length, caSig.length);
+
+    APDUResponse verify = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x01, 0x00, cert));
+    assertEquals(0x9000, verify.getSw());
+  }
+
+  @Test
+  @DisplayName("CLONE: reject a peer certificate not signed by the provisioned CA")
+  void cloneRejectForgedCertTest() throws Exception {
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+    BigInteger peerPriv = new BigInteger("0f0e0d0c0b0a09080706050403020100f0e0d0c0b0a090807060504030201000", 16);
+    ECPublicKey peerPub = (ECPublicKey) kf.generatePublic(
+        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(peerPriv), spec));
+    byte[] peerPubBytes = peerPub.getQ().getEncoded(false);
+
+    // Sign with a NON-CA key (a forger), not the provisioned CA
+    BigInteger forgerPriv = new BigInteger("dead00beef00cafe00babe00f00d00feed00c0ffee00deadbeef00cafe00babe", 16);
+    java.security.KeyPair forger = new java.security.KeyPair(
+        kf.generatePublic(new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(forgerPriv), spec)),
+        kf.generatePrivate(new org.bouncycastle.jce.spec.ECPrivateKeySpec(forgerPriv, spec)));
+    Signature forgerSigner = Signature.getInstance("SHA256withECDSA", "BC");
+    forgerSigner.initSign(forger.getPrivate());
+    forgerSigner.update(peerPubBytes);
+    byte[] forgedSig = forgerSigner.sign();
+
+    byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false);
+    assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes)).getSw());
+
+    byte[] cert = new byte[peerPubBytes.length + forgedSig.length];
+    System.arraycopy(peerPubBytes, 0, cert, 0, peerPubBytes.length);
+    System.arraycopy(forgedSig, 0, cert, peerPubBytes.length, forgedSig.length);
+
+    APDUResponse verify = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x01, 0x00, cert));
+    assertNotEquals(0x9000, verify.getSw());
+    assertEquals(0x6A80, verify.getSw()); // SW_WRONG_DATA
+  }
 }

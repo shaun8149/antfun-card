@@ -34,6 +34,11 @@ public class KeycardApplet extends Applet {
   static final byte INS_GET_DATA = (byte) 0xCA;
   static final byte INS_STORE_DATA = (byte) 0xE2;
   static final byte INS_GET_CHALLENGE = (byte) 0x84;
+  static final byte INS_CLONE = (byte) 0xD6;
+
+  static final byte CLONE_P1_SET_CA = 0x00;
+  static final byte CLONE_P1_VERIFY_PEER = 0x01;
+  static final short CLONE_PUBKEY_LEN = 65;
 
   static final short SW_REFERENCED_DATA_NOT_FOUND = (short) 0x6A88;
 
@@ -146,6 +151,8 @@ public class KeycardApplet extends Applet {
 
   private byte[] keyUID;
 
+  private ECPublicKey caPublicKey;
+
   private Crypto crypto;
   private SECP256k1 secp256k1;
 
@@ -182,6 +189,10 @@ public class KeycardApplet extends Applet {
 
     masterPublic = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, SECP256k1.SECP256K1_KEY_SIZE, false);
     masterPrivate = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, SECP256k1.SECP256K1_KEY_SIZE, false);
+
+    caPublicKey = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, SECP256k1.SECP256K1_KEY_SIZE, false);
+    SECP256k1.setCurveParameters(caPublicKey);
+
     masterChainCode = new byte[CHAIN_CODE_SIZE];
     altChainCode = new byte[CHAIN_CODE_SIZE];
     chainCode = masterChainCode;
@@ -240,7 +251,10 @@ public class KeycardApplet extends Applet {
           break;
       case INS_FACTORY_RESET:
           factoryReset(apdu);
-          return;          
+          return;
+        case INS_CLONE:
+          clone(apdu);
+          return;
         default:
           ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
           break;
@@ -967,6 +981,40 @@ public class KeycardApplet extends Applet {
     }
 
     clearKeys();
+  }
+
+  /**
+   * Processes the CLONE command (card-set clone spike).
+   * P1 = CLONE_P1_SET_CA: stores the CA public key used to authenticate peer cards (spike; production = perso).
+   * P1 = CLONE_P1_VERIFY_PEER: verifies a peer DAK certificate (peer pubkey || CA ECDSA-SHA256 signature) in-chip.
+   *
+   * @param apdu the JCRE-owned APDU object.
+   */
+  private void clone(APDU apdu) {
+    byte[] apduBuffer = apdu.getBuffer();
+    short len = (short) (apduBuffer[ISO7816.OFFSET_LC] & 0xFF);
+
+    switch (apduBuffer[OFFSET_P1]) {
+      case CLONE_P1_SET_CA:
+        if (len != CLONE_PUBKEY_LEN) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        caPublicKey.setW(apduBuffer, OFFSET_CDATA, len);
+        break;
+      case CLONE_P1_VERIFY_PEER:
+        if (len <= CLONE_PUBKEY_LEN) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        crypto.ecdsa.init(caPublicKey, Signature.MODE_VERIFY);
+        if (!crypto.ecdsa.verify(apduBuffer, OFFSET_CDATA, CLONE_PUBKEY_LEN,
+                                 apduBuffer, (short) (OFFSET_CDATA + CLONE_PUBKEY_LEN), (short) (len - CLONE_PUBKEY_LEN))) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        break;
+      default:
+        ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+        break;
+    }
   }
 
   private void factoryReset(APDU apdu) {
