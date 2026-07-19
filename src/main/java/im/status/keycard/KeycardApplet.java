@@ -1083,7 +1083,11 @@ public class KeycardApplet extends Applet {
                     CLONE_LABEL, (short) 0, (short) CLONE_LABEL.length, cloneScratch, (short) 32);
         cloneAesKey.setKey(cloneScratch, (short) 32);
         // 5) plaintext = masterPrivate(32) || masterChainCode(32) at cloneScratch[64]
-        masterPrivate.getS(cloneScratch, (short) 64);
+        // masterPrivate.getS may return < 32 bytes (leading-zero scalar) on some cards;
+        // zero the 32-byte slot and right-align the returned value so the layout is always correct.
+        short privLen = masterPrivate.getS(derivationOutput, (short) 0);
+        Util.arrayFillNonAtomic(cloneScratch, (short) 64, (short) 32, (byte) 0);
+        Util.arrayCopyNonAtomic(derivationOutput, (short) 0, cloneScratch, (short) (96 - privLen), privLen);
         Util.arrayCopyNonAtomic(masterChainCode, (short) 0, cloneScratch, (short) 96, CHAIN_CODE_SIZE);
         // 6) response = e_A_pub(65) || AES-CBC(zeroIV) ciphertext(64)
         short ephLen = secp256k1.derivePublicKey(ephemeralPriv, apduBuffer, OFFSET_CDATA);
