@@ -1598,4 +1598,43 @@ public class KeycardTest {
     assertNotEquals(0x9000, verify.getSw());
     assertEquals(0x6A80, verify.getSw()); // SW_WRONG_DATA
   }
+
+  @Test
+  @DisplayName("CLONE EXPORT: after verifying the peer cert, return a fresh ephemeral public key")
+  void cloneExportReturnsEphemeralPubkeyTest() throws Exception {
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+    BigInteger peerPriv = new BigInteger("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 16);
+    ECPublicKey peerPub = (ECPublicKey) kf.generatePublic(
+        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(peerPriv), spec));
+    byte[] peerPubBytes = peerPub.getQ().getEncoded(false);
+
+    Signature caSigner = Signature.getInstance("SHA256withECDSA", "BC");
+    caSigner.initSign(caKeyPair.getPrivate());
+    caSigner.update(peerPubBytes);
+    byte[] caSig = caSigner.sign();
+
+    byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false);
+    assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes)).getSw());
+
+    byte[] cert = new byte[peerPubBytes.length + caSig.length];
+    System.arraycopy(peerPubBytes, 0, cert, 0, peerPubBytes.length);
+    System.arraycopy(caSig, 0, cert, peerPubBytes.length, caSig.length);
+
+    APDUResponse export = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, cert));
+    assertEquals(0x9000, export.getSw());
+    byte[] eph = export.getData();
+    assertEquals(65, eph.length);              // uncompressed secp256k1 point
+    assertEquals(0x04, eph[0] & 0xFF);
+    spec.getCurve().decodePoint(eph);          // throws if not a valid curve point
+
+    // Two exports must yield DIFFERENT ephemeral keys (freshness)
+    byte[] eph2 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, cert)).getData();
+    assertFalse(Arrays.equals(eph, eph2));
+
+    // A forged cert must be rejected before any ephemeral key is produced
+    byte[] forged = cert.clone();
+    forged[forged.length - 1] ^= 0x01;
+    assertEquals(0x6A80, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, forged)).getSw());
+  }
 }

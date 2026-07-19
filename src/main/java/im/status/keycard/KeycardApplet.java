@@ -38,6 +38,7 @@ public class KeycardApplet extends Applet {
 
   static final byte CLONE_P1_SET_CA = 0x00;
   static final byte CLONE_P1_VERIFY_PEER = 0x01;
+  static final byte CLONE_P1_EXPORT = 0x02;
   static final short CLONE_PUBKEY_LEN = 65;
 
   static final short SW_REFERENCED_DATA_NOT_FOUND = (short) 0x6A88;
@@ -152,6 +153,7 @@ public class KeycardApplet extends Applet {
   private byte[] keyUID;
 
   private ECPublicKey caPublicKey;
+  private ECPrivateKey ephemeralPriv;
 
   private Crypto crypto;
   private SECP256k1 secp256k1;
@@ -192,6 +194,9 @@ public class KeycardApplet extends Applet {
 
     caPublicKey = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, SECP256k1.SECP256K1_KEY_SIZE, false);
     SECP256k1.setCurveParameters(caPublicKey);
+
+    ephemeralPriv = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, SECP256k1.SECP256K1_KEY_SIZE, false);
+    SECP256k1.setCurveParameters(ephemeralPriv);
 
     masterChainCode = new byte[CHAIN_CODE_SIZE];
     altChainCode = new byte[CHAIN_CODE_SIZE];
@@ -1011,6 +1016,23 @@ public class KeycardApplet extends Applet {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
         break;
+      case CLONE_P1_EXPORT: {
+        if (len <= CLONE_PUBKEY_LEN) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        // Authenticate the peer's DAK certificate in-chip before producing anything
+        crypto.ecdsa.init(caPublicKey, Signature.MODE_VERIFY);
+        if (!crypto.ecdsa.verify(apduBuffer, OFFSET_CDATA, CLONE_PUBKEY_LEN,
+                                 apduBuffer, (short) (OFFSET_CDATA + CLONE_PUBKEY_LEN), (short) (len - CLONE_PUBKEY_LEN))) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        // Fresh ephemeral keypair; return the ephemeral public key (e_A_pub)
+        crypto.random.generateData(derivationOutput, (short) 0, (short) 32);
+        ephemeralPriv.setS(derivationOutput, (short) 0, (short) 32);
+        short ephLen = secp256k1.derivePublicKey(ephemeralPriv, apduBuffer, OFFSET_CDATA);
+        apdu.setOutgoingAndSend(OFFSET_CDATA, ephLen);
+        break;
+      }
       default:
         ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
         break;
