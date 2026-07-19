@@ -19,6 +19,7 @@ public class CashApplet extends Applet {
   private Crypto crypto;
   private SECP256k1 secp256k1;
   private byte[] tapHash;
+  private short tapCounter;
 
 
   /**
@@ -150,12 +151,19 @@ public class CashApplet extends Applet {
   private void tapSign(APDU apdu) {
     byte[] apduBuffer = apdu.getBuffer();
     short chLen = (short) (apduBuffer[ISO7816.OFFSET_LC] & 0xFF);
-    // hash = SHA256(CSK_TAP_DOMAIN || challenge)
+    JCSystem.beginTransaction();
+    tapCounter++;
+    JCSystem.commitTransaction();
+    // hash = SHA256(CSK_TAP_DOMAIN || challenge || counter(2))
+    short ctrOff = (short) (ISO7816.OFFSET_CDATA + chLen);
+    Util.setShort(apduBuffer, ctrOff, tapCounter);
     crypto.sha256.reset();
     crypto.sha256.update(CSK_TAP_DOMAIN, (short) 0, (short) CSK_TAP_DOMAIN.length);
-    crypto.sha256.doFinal(apduBuffer, ISO7816.OFFSET_CDATA, chLen, tapHash, (short) 0);
-    // sign the hash with the CSK key; write the signature at OFFSET_CDATA
-    short sigLen = secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, privateKey, tapHash, (short) 0, apduBuffer, ISO7816.OFFSET_CDATA);
-    apdu.setOutgoingAndSend(ISO7816.OFFSET_CDATA, sigLen);
+    crypto.sha256.update(apduBuffer, ISO7816.OFFSET_CDATA, chLen);
+    crypto.sha256.doFinal(apduBuffer, ctrOff, (short) 2, tapHash, (short) 0);
+    // response = counter(2) || sig
+    Util.setShort(apduBuffer, ISO7816.OFFSET_CDATA, tapCounter);
+    short sigLen = secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, privateKey, tapHash, (short) 0, apduBuffer, (short) (ISO7816.OFFSET_CDATA + 2));
+    apdu.setOutgoingAndSend(ISO7816.OFFSET_CDATA, (short) (2 + sigLen));
   }
 }

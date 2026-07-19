@@ -1261,7 +1261,7 @@ public class KeycardTest {
   }
 
   @Test
-  @DisplayName("CASH CSK tap-sign: signs SHA256(domain||challenge) with the card's CSK key")
+  @DisplayName("CASH CSK tap-sign: signs SHA256(domain||challenge||counter) with the card's CSK key")
   void cashTapSignTest() throws Exception {
     CashCommandSet cashCmdSet = new CashCommandSet(sdkChannel);
     APDUResponse response = cashCmdSet.select();
@@ -1277,15 +1277,21 @@ public class KeycardTest {
     byte[] challenge = "hello-antfun-tap".getBytes();
     // domain-separated message the card is expected to hash:
     byte[] domain = "ANTFUN-TAP-v1".getBytes();
-    byte[] toHash = new byte[domain.length + challenge.length];
-    System.arraycopy(domain, 0, toHash, 0, domain.length);
-    System.arraycopy(challenge, 0, toHash, domain.length, challenge.length);
-    byte[] expectedHash = sha256(toHash);
 
     // send tap-sign (same P2 sign-format value used for ECDSA elsewhere, e.g. signTest/KeycardCommandSet.SIGN_P2_ECDSA)
     APDUResponse resp = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, challenge));
     assertEquals(0x9000, resp.getSw());
-    byte[] sig = resp.getData();
+    byte[] data = resp.getData();
+    assertTrue(data.length > 2, "response must be counter(2)||sig");
+    int counter = ((data[0] & 0xFF) << 8) | (data[1] & 0xFF);
+    byte[] sig = Arrays.copyOfRange(data, 2, data.length);
+
+    byte[] toHash = new byte[domain.length + challenge.length + 2];
+    System.arraycopy(domain, 0, toHash, 0, domain.length);
+    System.arraycopy(challenge, 0, toHash, domain.length, challenge.length);
+    toHash[domain.length + challenge.length] = (byte) ((counter >> 8) & 0xFF);
+    toHash[domain.length + challenge.length + 1] = (byte) (counter & 0xFF);
+    byte[] expectedHash = sha256(toHash);
 
     // verify the ECDSA signature over expectedHash against the CSK pubkey (mirrors verifySignResp's BC verification)
     Signature signature = Signature.getInstance("SHA256withECDSA", "BC");
@@ -1293,12 +1299,66 @@ public class KeycardTest {
     signature.update(toHash);
     assertTrue(signature.verify(sig));
 
-    // sanity: the hash the card is documented to sign matches SHA256(domain||challenge)
+    // sanity: the hash the card is documented to sign matches SHA256(domain||challenge||counter)
     assertEquals(32, expectedHash.length);
 
     // a different challenge must yield a different signature
-    byte[] sig2 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, "different".getBytes())).getData();
+    byte[] resp2Data = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, "different".getBytes())).getData();
+    byte[] sig2 = Arrays.copyOfRange(resp2Data, 2, resp2Data.length);
     assertFalse(Arrays.equals(sig, sig2));
+  }
+
+  @Test
+  @DisplayName("CASH CSK tap-sign: binds a persistent monotonic counter")
+  void cashTapCounterTest() throws Exception {
+    CashCommandSet cashCmdSet = new CashCommandSet(sdkChannel);
+    APDUResponse response = cashCmdSet.select();
+    assertEquals(0x9000, response.getSw());
+
+    CashApplicationInfo info = new CashApplicationInfo(response.getData());
+    byte[] pubKeyData = info.getPubKey();
+
+    ECParameterSpec ecSpec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    ECPublicKeySpec cardKeySpec = new ECPublicKeySpec(ecSpec.getCurve().decodePoint(pubKeyData), ecSpec);
+    ECPublicKey ecPublicKey = (ECPublicKey) KeyFactory.getInstance("ECDSA", "BC").generatePublic(cardKeySpec);
+
+    byte[] challenge = "meeting-proof".getBytes();
+
+    APDUResponse r1 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, challenge));
+    assertEquals(0x9000, r1.getSw());
+    int counter1 = ((r1.getData()[0] & 0xFF) << 8) | (r1.getData()[1] & 0xFF);
+    byte[] sig1 = Arrays.copyOfRange(r1.getData(), 2, r1.getData().length);
+
+    APDUResponse r2 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, challenge));
+    assertEquals(0x9000, r2.getSw());
+    int counter2 = ((r2.getData()[0] & 0xFF) << 8) | (r2.getData()[1] & 0xFF);
+    assertTrue(counter2 > counter1, "counter must strictly increase");
+
+    // sig1 must verify over SHA256(domain || challenge || counter1) -- i.e. the counter is bound into the signature
+    byte[] domain = "ANTFUN-TAP-v1".getBytes();
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    bos.write(domain);
+    bos.write(challenge);
+    bos.write((counter1 >> 8) & 0xFF);
+    bos.write(counter1 & 0xFF);
+    byte[] preimage1 = bos.toByteArray();
+
+    Signature signature = Signature.getInstance("SHA256withECDSA", "BC");
+    signature.initVerify(ecPublicKey);
+    signature.update(preimage1);
+    assertTrue(signature.verify(sig1), "signature must verify against the pre-image bound to the returned counter");
+
+    // negative control: sig1 must NOT verify against a pre-image using counter2 -- proves the counter is
+    // actually baked into the signed hash, not merely echoed alongside an unrelated signature.
+    ByteArrayOutputStream wrongBos = new ByteArrayOutputStream();
+    wrongBos.write(domain);
+    wrongBos.write(challenge);
+    wrongBos.write((counter2 >> 8) & 0xFF);
+    wrongBos.write(counter2 & 0xFF);
+    Signature signature2 = Signature.getInstance("SHA256withECDSA", "BC");
+    signature2.initVerify(ecPublicKey);
+    signature2.update(wrongBos.toByteArray());
+    assertFalse(signature2.verify(sig1), "sig1 must not verify against a pre-image built with a different counter");
   }
 
   @Test
