@@ -9,4 +9,4 @@
 /bin
 /gradle.properties
 buildSrc/build
-buildSrc/.gradlegradle.properties
+buildSrc/.gradle
