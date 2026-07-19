@@ -1049,6 +1049,9 @@ public class KeycardApplet extends Applet {
         }
         break;
       case CLONE_P1_EXPORT: {
+        if (!pin.isValidated()) {
+          ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
         // input = nonce(16) || peerPubkey(65) || CA signature
         short peerOff = (short) (OFFSET_CDATA + CLONE_NONCE_LEN);
         short sigOff = (short) (peerOff + CLONE_PUBKEY_LEN);
@@ -1094,6 +1097,9 @@ public class KeycardApplet extends Applet {
         break;
       }
       case CLONE_P1_IMPORT: {
+        if (!pin.isValidated()) {
+          ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
         // input = nonce(16) || e_A_pub(65) || ct(64) || tag(16)
         short ephOff = (short) (OFFSET_CDATA + CLONE_NONCE_LEN);
         short ctOff = (short) (ephOff + CLONE_PUBKEY_LEN);

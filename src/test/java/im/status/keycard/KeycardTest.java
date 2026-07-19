@@ -1678,6 +1678,33 @@ public class KeycardTest {
   }
 
   @Test
+  @DisplayName("CLONE EXPORT: requires PIN verification")
+  void cloneExportRequiresPinTest() throws Exception {
+    // Fresh applet (per @BeforeEach isolation): PIN is set but NOT verified in this session.
+    byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false);
+    assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes)).getSw());
+
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+    BigInteger bPriv = new BigInteger("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 16);
+    byte[] bPubBytes = ((ECPublicKey) kf.generatePublic(
+        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(bPriv), spec))).getQ().getEncoded(false);
+    Signature caSigner = Signature.getInstance("SHA256withECDSA", "BC");
+    caSigner.initSign(caKeyPair.getPrivate());
+    caSigner.update(bPubBytes);
+    byte[] caSig = caSigner.sign();
+
+    byte[] in = new byte[16 + bPubBytes.length + caSig.length];
+    for (int i = 0; i < 16; i++) in[i] = (byte) (0xE0 + i);
+    System.arraycopy(bPubBytes, 0, in, 16, bPubBytes.length);
+    System.arraycopy(caSig, 0, in, 16 + bPubBytes.length, caSig.length);
+
+    // No verifyPIN in this session -> export must be refused.
+    APDUResponse r = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in));
+    assertEquals(0x6985, r.getSw()); // SW_CONDITIONS_NOT_SATISFIED
+  }
+
+  @Test
   @DisplayName("CLONE EXPORT: reject a reused nonce (anti-replay)")
   void cloneExportRejectsReusedNonceTest() throws Exception {
     cmdSet.autoOpenSecureChannel();
