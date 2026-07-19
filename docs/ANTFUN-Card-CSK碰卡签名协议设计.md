@@ -99,9 +99,9 @@ INS_CSK_TAP_SIGN:
 
 ---
 
-## 七、建议的推进方式
+## 七、推进方式与进度
 
-- **现在(不等硬件)**:我可以先在 jcardsim 上把 **INS_CSK_TAP_SIGN 的核心签名逻辑**用 TDD 做出来(单向、域前缀、counter、serial),把不确定的字节格式留成参数。这样硬件一到,只需按 B1 结论调格式 + 接 NDEF/iOS,不用从零。
-- **等 B1 后**:定死流 A(iOS 可行性)、流 B(令牌/deep-link)、双向证明,补齐 NDEF 与端到端。
+- **✅ 已完成(仿真器,不依赖硬件)**:`INS_CSK_TAP_SIGN` 核心在 CashApplet 上做好并 TDD 通过——卡内对 `SHA256("ANTFUN-TAP-v1" ‖ challenge ‖ counter(2))` 用 CSK 私钥签名,持久单调 counter 绑进签名(负控证明不可挪用),签名对 CSK 公钥验通,不同 challenge 出不同签名。见 `docs/superpowers/plans/2026-07-19-csk-tap-sign-core.md`。
+- **⬜ 等 B1(真机 NFC)后落码**:challenge 确切字节格式(nonce/ts/ctx)、serial 进 payload/响应、counter 位宽(当前 16-bit,65536 次绕回)、流 B 的 NDEF 静态令牌、双向见面证明的两卡编排。定死后接 NDEF/iOS 端到端。
 
 *本设计与《安全威胁模型》§1.1 一致,是其 applet 级展开;与 clone 一样,先写先测、后接真机。*
