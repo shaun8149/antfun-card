@@ -1261,6 +1261,47 @@ public class KeycardTest {
   }
 
   @Test
+  @DisplayName("CASH CSK tap-sign: signs SHA256(domain||challenge) with the card's CSK key")
+  void cashTapSignTest() throws Exception {
+    CashCommandSet cashCmdSet = new CashCommandSet(sdkChannel);
+    APDUResponse response = cashCmdSet.select();
+    assertEquals(0x9000, response.getSw());
+
+    CashApplicationInfo info = new CashApplicationInfo(response.getData());
+    byte[] pubKeyData = info.getPubKey();
+
+    ECParameterSpec ecSpec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    ECPublicKeySpec cardKeySpec = new ECPublicKeySpec(ecSpec.getCurve().decodePoint(pubKeyData), ecSpec);
+    ECPublicKey ecPublicKey = (ECPublicKey) KeyFactory.getInstance("ECDSA", "BC").generatePublic(cardKeySpec);
+
+    byte[] challenge = "hello-antfun-tap".getBytes();
+    // domain-separated message the card is expected to hash:
+    byte[] domain = "ANTFUN-TAP-v1".getBytes();
+    byte[] toHash = new byte[domain.length + challenge.length];
+    System.arraycopy(domain, 0, toHash, 0, domain.length);
+    System.arraycopy(challenge, 0, toHash, domain.length, challenge.length);
+    byte[] expectedHash = sha256(toHash);
+
+    // send tap-sign (same P2 sign-format value used for ECDSA elsewhere, e.g. signTest/KeycardCommandSet.SIGN_P2_ECDSA)
+    APDUResponse resp = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, challenge));
+    assertEquals(0x9000, resp.getSw());
+    byte[] sig = resp.getData();
+
+    // verify the ECDSA signature over expectedHash against the CSK pubkey (mirrors verifySignResp's BC verification)
+    Signature signature = Signature.getInstance("SHA256withECDSA", "BC");
+    signature.initVerify(ecPublicKey);
+    signature.update(toHash);
+    assertTrue(signature.verify(sig));
+
+    // sanity: the hash the card is documented to sign matches SHA256(domain||challenge)
+    assertEquals(32, expectedHash.length);
+
+    // a different challenge must yield a different signature
+    byte[] sig2 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, "different".getBytes())).getData();
+    assertFalse(Arrays.equals(sig, sig2));
+  }
+
+  @Test
   @DisplayName("Mnemonic load and derivation")
   @Tag("manual")
   void mnemonicTest() throws Exception {

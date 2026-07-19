@@ -9,12 +9,16 @@ public class CashApplet extends Applet {
   private static final short SIGN_OUT_OFF = ISO7816.OFFSET_CDATA + MessageDigest.LENGTH_SHA_256;
   private static final byte TLV_PUB_DATA = (byte) 0x82;
 
+  static final byte INS_CSK_TAP_SIGN = (byte) 0xD7;
+  private static final byte[] CSK_TAP_DOMAIN = { 'A','N','T','F','U','N','-','T','A','P','-','v','1' };
+
   private KeyPair keypair;
   private ECPublicKey publicKey;
   private ECPrivateKey privateKey;
 
   private Crypto crypto;
   private SECP256k1 secp256k1;
+  private byte[] tapHash;
 
 
   /**
@@ -50,6 +54,8 @@ public class CashApplet extends Applet {
     SECP256k1.setCurveParameters(privateKey);
     keypair.genKeyPair();
 
+    tapHash = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_DESELECT);
+
     short c9Off = (short)(bOffset + bArray[bOffset] + 1); // Skip AID
     c9Off += (short)(bArray[c9Off] + 1); // Skip Privileges and parameter length
 
@@ -77,6 +83,9 @@ public class CashApplet extends Applet {
       switch (apduBuffer[ISO7816.OFFSET_INS]) {
         case KeycardApplet.INS_SIGN:
           sign(apdu);
+          break;
+        case INS_CSK_TAP_SIGN:
+          tapSign(apdu);
           break;
         default:
           ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
@@ -136,5 +145,17 @@ public class CashApplet extends Applet {
     apduBuffer[(short) (SIGN_OUT_OFF + 2)] = (byte) (outLen - 3);
 
     apdu.setOutgoingAndSend(SIGN_OUT_OFF, outLen);
+  }
+
+  private void tapSign(APDU apdu) {
+    byte[] apduBuffer = apdu.getBuffer();
+    short chLen = (short) (apduBuffer[ISO7816.OFFSET_LC] & 0xFF);
+    // hash = SHA256(CSK_TAP_DOMAIN || challenge)
+    crypto.sha256.reset();
+    crypto.sha256.update(CSK_TAP_DOMAIN, (short) 0, (short) CSK_TAP_DOMAIN.length);
+    crypto.sha256.doFinal(apduBuffer, ISO7816.OFFSET_CDATA, chLen, tapHash, (short) 0);
+    // sign the hash with the CSK key; write the signature at OFFSET_CDATA
+    short sigLen = secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, privateKey, tapHash, (short) 0, apduBuffer, ISO7816.OFFSET_CDATA);
+    apdu.setOutgoingAndSend(ISO7816.OFFSET_CDATA, sigLen);
   }
 }
