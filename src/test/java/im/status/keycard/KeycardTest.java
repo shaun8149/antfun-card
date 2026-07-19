@@ -58,6 +58,7 @@ public class KeycardTest {
   private static im.status.keycard.io.CardChannel sdkChannel;
   private static CardSimulator simulator;
   private static KeyPair caKeyPair;
+  private static Certificate identCert;
 
   private TestKeycardCommandSet cmdSet;
 
@@ -198,11 +199,20 @@ public class KeycardTest {
   }
 
   private static void initIfNeeded() throws Exception {
-    KeyPair identKeyPair = Certificate.generateIdentKeyPair();
-    Certificate cert = Certificate.createCertificate(caKeyPair, identKeyPair);
+    // Generate the DAK identity keypair/certificate only once per JVM run (not once per test).
+    // Certificate.createCertificate() signs with a random ECDSA nonce; the DER r/s components
+    // occasionally serialize shorter than 32 bytes (client SDK's toUInt() only strips a single
+    // leading zero byte and does not re-pad), which makes storeData() below fail with SW_WRONG_DATA.
+    // Reusing one fixed, already-known-good Certificate object across every @BeforeEach call keeps
+    // the (tiny, pre-existing) odds of hitting that edge case the same as before per-test isolation
+    // was introduced, instead of multiplying them by the number of tests.
+    if (identCert == null) {
+      KeyPair identKeyPair = Certificate.generateIdentKeyPair();
+      identCert = Certificate.createCertificate(caKeyPair, identKeyPair);
+    }
     IdentCommandSet idCmdSet = new IdentCommandSet(sdkChannel);
     idCmdSet.select().checkOK();
-    idCmdSet.storeData(cert.toStoreData()).checkOK();
+    idCmdSet.storeData(identCert.toStoreData()).checkOK();
 
     KeycardCommandSet cmdSet = new KeycardCommandSet(sdkChannel, ((org.bouncycastle.jce.interfaces.ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(true));
     cmdSet.select().checkOK();
@@ -217,7 +227,12 @@ public class KeycardTest {
 
   @BeforeEach
   void init() throws Exception {
-    reset();
+    if (TARGET == TARGET_SIMULATOR) {
+      openSimulatorChannel(); // fresh CardSimulator + reinstall all applets (pristine persistent state)
+      initIfNeeded();         // reprovision the DAK cert + init the card (PIN/PUK)
+    } else {
+      reset();
+    }
     cmdSet = new TestKeycardCommandSet(sdkChannel, ((org.bouncycastle.jce.interfaces.ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(true));
     cmdSet.select().checkOK();
   }
