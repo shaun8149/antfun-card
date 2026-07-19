@@ -43,6 +43,7 @@ public class KeycardApplet extends Applet {
   static final short CLONE_PUBKEY_LEN = 65;
   static final short CLONE_NONCE_LEN = 16;
   static final short CLONE_SEED_LEN = 64;   // masterPrivate(32) || masterChainCode(32)
+  static final short CLONE_TAG_LEN = 16;
   static final byte[] CLONE_LABEL = { 'A', 'N', 'T', 'F', 'U', 'N', '-', 'C', 'L', 'O', 'N', 'E', '-', 'v', '1' };
 
   static final short SW_REFERENCED_DATA_NOT_FOUND = (short) 0x6A88;
@@ -1061,8 +1062,12 @@ public class KeycardApplet extends Applet {
         // 6) response = e_A_pub(65) || AES-CBC(zeroIV) ciphertext(64)
         short ephLen = secp256k1.derivePublicKey(ephemeralPriv, apduBuffer, OFFSET_CDATA);
         cloneAesCbc.init(cloneAesKey, Cipher.MODE_ENCRYPT, cloneZeroIv, (short) 0, (short) 16);
-        short ctLen = cloneAesCbc.doFinal(cloneScratch, (short) 64, CLONE_SEED_LEN, apduBuffer, (short) (OFFSET_CDATA + ephLen));
-        apdu.setOutgoingAndSend(OFFSET_CDATA, (short) (ephLen + ctLen));
+        short ctOff = (short) (OFFSET_CDATA + ephLen);
+        short ctLen = cloneAesCbc.doFinal(cloneScratch, (short) 64, CLONE_SEED_LEN, apduBuffer, ctOff);
+        // tag = HMAC-SHA256(macKey = OKM[16..32], ct)[0..16], written after the ciphertext
+        crypto.hmacSHA256(cloneScratch, (short) 48, (short) 16, apduBuffer, ctOff, ctLen, derivationOutput, (short) 0);
+        Util.arrayCopyNonAtomic(derivationOutput, (short) 0, apduBuffer, (short) (ctOff + ctLen), CLONE_TAG_LEN);
+        apdu.setOutgoingAndSend(OFFSET_CDATA, (short) (ephLen + ctLen + CLONE_TAG_LEN));
         break;
       }
       default:

@@ -1652,29 +1652,28 @@ public class KeycardTest {
     APDUResponse export = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in));
     assertEquals(0x9000, export.getSw());
     byte[] out = export.getData();
-    assertEquals(65 + 64, out.length); // e_A_pub(65) || ciphertext(64)
+    assertEquals(65 + 64 + 16, out.length); // e_A_pub(65) || ct(64) || tag(16)
     byte[] eaPub = Arrays.copyOfRange(out, 0, 65);
     byte[] ct = Arrays.copyOfRange(out, 65, 129);
+    byte[] tag = Arrays.copyOfRange(out, 129, 145);
 
-    // --- Card B (played by the test): ECDH(bPriv, e_A_pub) -> shared X ---
     org.bouncycastle.math.ec.ECPoint shared = spec.getCurve().decodePoint(eaPub).multiply(bPriv).normalize();
     byte[] x = Numeric.toBytesPadded(shared.getAffineXCoord().toBigInteger(), 32);
-
-    // HKDF-SHA256(salt=nonce, ikm=X, info="ANTFUN-CLONE-v1") -> OKM[0..16] = AES key
     byte[] okm = hkdfSha256(nonce, x, "ANTFUN-CLONE-v1".getBytes(), 32);
-    byte[] aesKey = Arrays.copyOfRange(okm, 0, 16);
+    byte[] encKey = Arrays.copyOfRange(okm, 0, 16);
+    byte[] macKey = Arrays.copyOfRange(okm, 16, 32);
 
-    // AES-CBC (zero IV) decrypt -> masterPriv(32) || chainCode(32)
+    // Tag must authenticate the ciphertext
+    byte[] expectedTag = Arrays.copyOfRange(hmacSha256(macKey, ct), 0, 16);
+    assertArrayEquals(expectedTag, tag, "clone ciphertext tag must verify");
+
     javax.crypto.Cipher aes = javax.crypto.Cipher.getInstance("AES/CBC/NoPadding", "BC");
-    aes.init(javax.crypto.Cipher.DECRYPT_MODE, new javax.crypto.spec.SecretKeySpec(aesKey, "AES"),
+    aes.init(javax.crypto.Cipher.DECRYPT_MODE, new javax.crypto.spec.SecretKeySpec(encKey, "AES"),
              new javax.crypto.spec.IvParameterSpec(new byte[16]));
     byte[] pt = aes.doFinal(ct);
     byte[] masterPriv = Arrays.copyOfRange(pt, 0, 32);
-
-    // Derive the master public key from the recovered private key; its sha256 must equal A's key UID
     byte[] recoveredPub = spec.getG().multiply(new BigInteger(1, masterPriv)).normalize().getEncoded(false);
-    assertArrayEquals(keyUID, sha256(recoveredPub),
-        "peer B must recover the same master key as card A");
+    assertArrayEquals(keyUID, sha256(recoveredPub), "peer B must recover the same master key as card A");
   }
 
   private static byte[] hkdfSha256(byte[] salt, byte[] ikm, byte[] info, int len) throws Exception {
@@ -1685,5 +1684,11 @@ public class KeycardTest {
     mac.update(info);
     mac.update((byte) 0x01);
     return Arrays.copyOfRange(mac.doFinal(), 0, len);
+  }
+
+  private static byte[] hmacSha256(byte[] key, byte[] data) throws Exception {
+    javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+    mac.init(new javax.crypto.spec.SecretKeySpec(key, "HmacSHA256"));
+    return mac.doFinal(data);
   }
 }
