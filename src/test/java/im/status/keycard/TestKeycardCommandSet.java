@@ -118,4 +118,12 @@ public class TestKeycardCommandSet extends KeycardCommandSet {
   public APDUResponse exportBIP85(int p1, byte[] data) throws IOException {
     return this.getSecureChannel().transmit(channel, this.getSecureChannel().protectedCommand(0x80, KeycardApplet.INS_EXPORT_BIP85, p1, 0, data));
   }
+
+  public APDUResponse storeSecret(int p1, int p2, byte[] data) throws IOException {
+    return this.getSecureChannel().transmit(channel, this.getSecureChannel().protectedCommand(0x80, KeycardApplet.INS_STORE_SECRET, p1, p2, data));
+  }
+
+  public APDUResponse exportSecret() throws IOException {
+    return this.getSecureChannel().transmit(channel, this.getSecureChannel().protectedCommand(0x80, KeycardApplet.INS_EXPORT_SECRET, 0, 0, new byte[0]));
+  }
 }

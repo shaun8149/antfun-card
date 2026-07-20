@@ -48,6 +48,7 @@ import java.util.Random;
 
 import static org.apache.commons.codec.digest.DigestUtils.sha256;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 import apdu4j.pcsc.TerminalManager;
 
@@ -1987,5 +1988,43 @@ public class KeycardTest {
     assertEquals(0x9000, cmdSet.exportKey(p, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardCommandSet.EXPORT_KEY_P2_EXTENDED_PUBLIC).getSw());
     // On-chip generation still works
     assertTrue(cmdSet.getKeyInitializationStatus());
+  }
+
+  @Test
+  @DisplayName("VAULT: store(import) & export entropy round-trips, PIN-gated (seed-storage SKU)")
+  void vaultStoreExportTest() throws Exception {
+    assumeFalse(KeycardApplet.NO_MNEMONIC, "seed-storage SKU only");
+    cmdSet.autoOpenSecureChannel();
+
+    byte[] entropy = Hex.decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"); // 32B
+
+    // PIN gate: store before PIN -> 0x6985
+    assertEquals(0x6985, cmdSet.storeSecret(KeycardApplet.STORE_SECRET_P1_IMPORT, 0, entropy).getSw());
+    // PIN gate: export before PIN -> 0x6985
+    assertEquals(0x6985, cmdSet.exportSecret().getSw());
+
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+
+    // store(import) then export -> identical
+    assertEquals(0x9000, cmdSet.storeSecret(KeycardApplet.STORE_SECRET_P1_IMPORT, 0, entropy).getSw());
+    APDUResponse exp = cmdSet.exportSecret();
+    assertEquals(0x9000, exp.getSw());
+    assertArrayEquals(entropy, exp.getData());
+  }
+
+  @Test
+  @DisplayName("VAULT: invalid entropy length rejected (seed-storage SKU)")
+  void vaultPinAndLengthTest() throws Exception {
+    assumeFalse(KeycardApplet.NO_MNEMONIC, "seed-storage SKU only");
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+
+    // 17 bytes is not a valid BIP-39 entropy length -> 0x6A80
+    assertEquals(0x6A80, cmdSet.storeSecret(KeycardApplet.STORE_SECRET_P1_IMPORT, 0, new byte[17]).getSw());
+    // 24 bytes IS valid -> 0x9000, and round-trips
+    byte[] e24 = new byte[24];
+    for (short i = 0; i < 24; i++) e24[i] = (byte) (i + 1);
+    assertEquals(0x9000, cmdSet.storeSecret(KeycardApplet.STORE_SECRET_P1_IMPORT, 0, e24).getSw());
+    assertArrayEquals(e24, cmdSet.exportSecret().getData());
   }
 }
