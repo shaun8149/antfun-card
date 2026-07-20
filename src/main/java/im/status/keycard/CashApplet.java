@@ -11,6 +11,8 @@ public class CashApplet extends Applet {
 
   static final byte INS_CSK_TAP_SIGN = (byte) 0xD7;
   private static final byte[] CSK_TAP_DOMAIN = { 'A','N','T','F','U','N','-','T','A','P','-','v','1' };
+  static final byte INS_TICKET_TAP_SIGN = (byte) 0xD8;
+  private static final byte[] TICKET_TAP_DOMAIN = { 'A','N','T','F','U','N','-','T','I','C','K','E','T','-','v','1' };
 
   private KeyPair keypair;
   private ECPublicKey publicKey;
@@ -20,6 +22,11 @@ public class CashApplet extends Applet {
   private SECP256k1 secp256k1;
   private byte[] tapHash;
   private short tapCounter;
+
+  private KeyPair ticketKeypair;
+  private ECPublicKey ticketPublicKey;
+  private ECPrivateKey ticketPrivateKey;
+  private short ticketCounter;
 
 
   /**
@@ -55,6 +62,13 @@ public class CashApplet extends Applet {
     SECP256k1.setCurveParameters(privateKey);
     keypair.genKeyPair();
 
+    ticketKeypair = new KeyPair(KeyPair.ALG_EC_FP, SECP256k1.SECP256K1_KEY_SIZE);
+    ticketPublicKey = (ECPublicKey) ticketKeypair.getPublic();
+    ticketPrivateKey = (ECPrivateKey) ticketKeypair.getPrivate();
+    SECP256k1.setCurveParameters(ticketPublicKey);
+    SECP256k1.setCurveParameters(ticketPrivateKey);
+    ticketKeypair.genKeyPair();
+
     tapHash = JCSystem.makeTransientByteArray((short) 32, JCSystem.CLEAR_ON_DESELECT);
 
     short c9Off = (short)(bOffset + bArray[bOffset] + 1); // Skip AID
@@ -87,6 +101,9 @@ public class CashApplet extends Applet {
           break;
         case INS_CSK_TAP_SIGN:
           tapSign(apdu);
+          break;
+        case INS_TICKET_TAP_SIGN:
+          ticketSign(apdu);
           break;
         default:
           ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
@@ -165,5 +182,26 @@ public class CashApplet extends Applet {
     Util.setShort(apduBuffer, ISO7816.OFFSET_CDATA, tapCounter);
     short sigLen = secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, privateKey, tapHash, (short) 0, apduBuffer, (short) (ISO7816.OFFSET_CDATA + 2));
     apdu.setOutgoingAndSend(ISO7816.OFFSET_CDATA, (short) (2 + sigLen));
+  }
+
+  private void ticketSign(APDU apdu) {
+    byte[] apduBuffer = apdu.getBuffer();
+    short chLen = (short) (apduBuffer[ISO7816.OFFSET_LC] & 0xFF);
+    JCSystem.beginTransaction();
+    ticketCounter++;
+    JCSystem.commitTransaction();
+    // hash = SHA256(TICKET_TAP_DOMAIN || challenge || counter(2))
+    short ctrOff = (short) (ISO7816.OFFSET_CDATA + chLen);
+    Util.setShort(apduBuffer, ctrOff, ticketCounter);
+    crypto.sha256.reset();
+    crypto.sha256.update(TICKET_TAP_DOMAIN, (short) 0, (short) TICKET_TAP_DOMAIN.length);
+    crypto.sha256.update(apduBuffer, ISO7816.OFFSET_CDATA, chLen);
+    crypto.sha256.doFinal(apduBuffer, ctrOff, (short) 2, tapHash, (short) 0);
+    // response = TSK_pubkey(65) || counter(2) || sig   (challenge already consumed into the hash)
+    short pubLen = ticketPublicKey.getW(apduBuffer, ISO7816.OFFSET_CDATA);
+    short ctrRespOff = (short) (ISO7816.OFFSET_CDATA + pubLen);
+    Util.setShort(apduBuffer, ctrRespOff, ticketCounter);
+    short sigLen = secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, ticketPrivateKey, tapHash, (short) 0, apduBuffer, (short) (ctrRespOff + 2));
+    apdu.setOutgoingAndSend(ISO7816.OFFSET_CDATA, (short) (pubLen + 2 + sigLen));
   }
 }
