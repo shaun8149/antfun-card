@@ -1185,6 +1185,8 @@ public class KeycardApplet extends Applet {
     puk = null;
     secureChannel.reset();
     Util.arrayFillNonAtomic(data, (short) 0, (short) data.length, (byte) 0);
+    Util.arrayFillNonAtomic(secretStore, (short) 0, SECRET_MAX_LEN, (byte) 0);
+    secretLen = 0;
 
     if (JCSystem.isObjectDeletionSupported()) {
       JCSystem.requestObjectDeletion();

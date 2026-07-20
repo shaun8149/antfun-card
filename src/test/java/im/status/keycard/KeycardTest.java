@@ -2027,4 +2027,34 @@ public class KeycardTest {
     assertEquals(0x9000, cmdSet.storeSecret(KeycardApplet.STORE_SECRET_P1_IMPORT, 0, e24).getSw());
     assertArrayEquals(e24, cmdSet.exportSecret().getData());
   }
+
+  @Test
+  @DisplayName("VAULT: factory reset wipes entropy (seed-storage SKU)")
+  void vaultFactoryResetWipeTest() throws Exception {
+    assumeFalse(KeycardApplet.NO_MNEMONIC, "seed-storage SKU only");
+    cmdSet.autoOpenSecureChannel();
+
+    byte[] entropy = Hex.decode("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    // Store entropy
+    assertEquals(0x9000, cmdSet.storeSecret(KeycardApplet.STORE_SECRET_P1_IMPORT, 0, entropy).getSw());
+    // Verify it exists
+    APDUResponse exp = cmdSet.exportSecret();
+    assertEquals(0x9000, exp.getSw());
+    assertArrayEquals(entropy, exp.getData());
+
+    // Factory reset
+    assertEquals(0x9000, cmdSet.factoryReset().getSw());
+
+    // Re-init and re-open secure channel
+    cmdSet.select();
+    initCard(cmdSet);
+    cmdSet.select();
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+
+    // After reset, secretLen should be 0, so export should fail with 0x6985
+    assertEquals(0x6985, cmdSet.exportSecret().getSw());
+  }
 }
