@@ -1258,6 +1258,59 @@ public class KeycardTest {
   }
 
   @Test
+  @DisplayName("TICKET tap-sign: independent TSK key signs SHA256(domain||challenge||counter), isolated from CSK/cash key")
+  void ticketTapSignTest() throws Exception {
+    CashCommandSet cashCmdSet = new CashCommandSet(sdkChannel);
+    APDUResponse sel = cashCmdSet.select();
+    assertEquals(0x9000, sel.getSw());
+    byte[] cashPubData = new CashApplicationInfo(sel.getData()).getPubKey(); // cash/CSK key
+
+    ECParameterSpec ecSpec = ECNamedCurveTable.getParameterSpec("secp256k1");
+
+    // challenge carries eventId||nonce (opaque bytes to the card in this core version)
+    byte[] challenge = "event-BKK2026|nonce-abc123".getBytes();
+    byte[] domain = "ANTFUN-TICKET-v1".getBytes();
+
+    APDUResponse resp = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD8, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, challenge));
+    assertEquals(0x9000, resp.getSw());
+    byte[] data = resp.getData();
+    assertTrue(data.length > 67, "response must be pubkey(65)||counter(2)||sig");
+
+    byte[] tskPub = Arrays.copyOfRange(data, 0, 65);
+    int counter = ((data[65] & 0xFF) << 8) | (data[66] & 0xFF);
+    byte[] sig = Arrays.copyOfRange(data, 67, data.length);
+
+    // TSK pubkey must be a valid secp256k1 point AND different from the cash/CSK pubkey (key isolation)
+    assertFalse(Arrays.equals(tskPub, cashPubData), "TSK key must be independent from cash/CSK key");
+    ECPublicKey tskKey = (ECPublicKey) KeyFactory.getInstance("ECDSA", "BC")
+        .generatePublic(new ECPublicKeySpec(ecSpec.getCurve().decodePoint(tskPub), ecSpec));
+
+    // sig verifies over SHA256(domain||challenge||counter) against the TSK pubkey
+    byte[] toHash = new byte[domain.length + challenge.length + 2];
+    System.arraycopy(domain, 0, toHash, 0, domain.length);
+    System.arraycopy(challenge, 0, toHash, domain.length, challenge.length);
+    toHash[domain.length + challenge.length] = (byte) ((counter >> 8) & 0xFF);
+    toHash[domain.length + challenge.length + 1] = (byte) (counter & 0xFF);
+    Signature v = Signature.getInstance("SHA256withECDSA", "BC");
+    v.initVerify(tskKey);
+    v.update(toHash);
+    assertTrue(v.verify(sig), "ticket sig must verify against the TSK pubkey");
+
+    // isolation: the ticket sig must NOT verify against the cash/CSK pubkey
+    ECPublicKey cashKey = (ECPublicKey) KeyFactory.getInstance("ECDSA", "BC")
+        .generatePublic(new ECPublicKeySpec(ecSpec.getCurve().decodePoint(cashPubData), ecSpec));
+    Signature v2 = Signature.getInstance("SHA256withECDSA", "BC");
+    v2.initVerify(cashKey);
+    v2.update(toHash);
+    assertFalse(v2.verify(sig), "ticket sig must not verify against the cash/CSK key");
+
+    // a different eventId (different challenge) must yield a different signature
+    byte[] resp2 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD8, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, "event-DXB2026|nonce-abc123".getBytes())).getData();
+    byte[] sig2 = Arrays.copyOfRange(resp2, 67, resp2.length);
+    assertFalse(Arrays.equals(sig, sig2), "different eventId must yield a different signature");
+  }
+
+  @Test
   @DisplayName("Mnemonic load and derivation")
   @Tag("manual")
   void mnemonicTest() throws Exception {
