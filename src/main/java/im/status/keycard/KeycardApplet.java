@@ -164,7 +164,8 @@ public class KeycardApplet extends Applet {
   private Cipher cloneAesCbc;
   private byte[] cloneScratch;
   private byte[] cloneZeroIv;
-  private byte[] lastCloneNonce;
+  private byte[] exportCounter;
+  private byte[] importCounter;
 
   private Crypto crypto;
   private SECP256k1 secp256k1;
@@ -213,7 +214,8 @@ public class KeycardApplet extends Applet {
     cloneAesCbc = Cipher.getInstance(Cipher.ALG_AES_BLOCK_128_CBC_NOPAD, false);
     cloneScratch = JCSystem.makeTransientByteArray((short) 128, JCSystem.CLEAR_ON_DESELECT);
     cloneZeroIv = new byte[16];
-    lastCloneNonce = new byte[CLONE_NONCE_LEN];
+    exportCounter = new byte[4];
+    importCounter = new byte[4];
 
     masterChainCode = new byte[CHAIN_CODE_SIZE];
     altChainCode = new byte[CHAIN_CODE_SIZE];
@@ -1026,6 +1028,26 @@ public class KeycardApplet extends Applet {
   }
 
   /**
+   * Returns true iff the 32-bit big-endian unsigned counter at buf[off..off+4) is strictly
+   * greater than the 32-bit big-endian unsigned counter stored in stored[0..4). Compared
+   * byte-by-byte as unsigned shorts (no JavaCard int arithmetic).
+   *
+   * @param buf buffer containing the candidate counter
+   * @param off offset of the candidate counter within buf
+   * @param stored the previously stored 4-byte counter
+   * @return true if the candidate counter is strictly greater than the stored counter
+   */
+  private boolean counterStrictlyGreater(byte[] buf, short off, byte[] stored) {
+    for (short i = 0; i < 4; i++) {
+      short a = (short) (buf[(short) (off + i)] & 0xFF);
+      short b = (short) (stored[i] & 0xFF);
+      if (a > b) return true;
+      if (a < b) return false;
+    }
+    return false; // equal -> not strictly greater
+  }
+
+  /**
    * Processes the CLONE command (card-set clone spike).
    * P1 = CLONE_P1_SET_CA: stores the CA public key used to authenticate peer cards (spike; production = perso).
    * P1 = CLONE_P1_VERIFY_PEER: verifies a peer DAK certificate (peer pubkey || CA ECDSA-SHA256 signature) in-chip.
@@ -1072,11 +1094,13 @@ public class KeycardApplet extends Applet {
                                  apduBuffer, sigOff, (short) (len - CLONE_NONCE_LEN - CLONE_PUBKEY_LEN))) {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
-        // Anti-replay: reject a nonce equal to the previous one, then record it
-        if (Util.arrayCompare(apduBuffer, OFFSET_CDATA, lastCloneNonce, (short) 0, CLONE_NONCE_LEN) == 0) {
+        // Anti-replay: require a strictly increasing 32-bit counter in the nonce's high 4 bytes.
+        if (!counterStrictlyGreater(apduBuffer, OFFSET_CDATA, exportCounter)) {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
-        Util.arrayCopy(apduBuffer, OFFSET_CDATA, lastCloneNonce, (short) 0, CLONE_NONCE_LEN);
+        JCSystem.beginTransaction();
+        Util.arrayCopy(apduBuffer, OFFSET_CDATA, exportCounter, (short) 0, (short) 4);
+        JCSystem.commitTransaction();
         // 2) Fresh ephemeral keypair
         crypto.random.generateData(derivationOutput, (short) 0, (short) 32);
         ephemeralPriv.setS(derivationOutput, (short) 0, (short) 32);

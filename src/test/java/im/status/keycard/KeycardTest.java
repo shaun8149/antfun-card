@@ -1860,6 +1860,51 @@ public class KeycardTest {
     assertEquals(0x6A80, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in)).getSw());
   }
 
+  private byte[] cloneNonce(int c) {
+    byte[] n = new byte[16];
+    n[0] = (byte) ((c >> 24) & 0xFF); n[1] = (byte) ((c >> 16) & 0xFF);
+    n[2] = (byte) ((c >> 8) & 0xFF);  n[3] = (byte) (c & 0xFF);
+    for (int i = 4; i < 16; i++) n[i] = (byte) i; // fixed low bytes
+    return n;
+  }
+
+  private APDUResponse cloneExport(byte[] nonce, byte[] peerPub, byte[] caSig) throws Exception {
+    byte[] in = new byte[16 + peerPub.length + caSig.length];
+    System.arraycopy(nonce, 0, in, 0, 16);
+    System.arraycopy(peerPub, 0, in, 16, peerPub.length);
+    System.arraycopy(caSig, 0, in, 16 + peerPub.length, caSig.length);
+    return sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in));
+  }
+
+  @Test
+  @DisplayName("CLONE EXPORT: reject a non-increasing counter (blocks alternating-nonce replay)")
+  void cloneExportRejectsNonMonotonicCounterTest() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+    byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false);
+    assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes)).getSw());
+
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+    BigInteger bPriv = new BigInteger("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 16);
+    byte[] peerPub = ((ECPublicKey) kf.generatePublic(
+        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(bPriv), spec))).getQ().getEncoded(false);
+    Signature caSigner = Signature.getInstance("SHA256withECDSA", "BC");
+    caSigner.initSign(caKeyPair.getPrivate());
+    caSigner.update(peerPub);
+    byte[] caSig = caSigner.sign();
+
+    // counter = 5 -> OK
+    assertEquals(0x9000, cloneExport(cloneNonce(5), peerPub, caSig).getSw());
+    // counter = 10 -> OK (strictly greater)
+    assertEquals(0x9000, cloneExport(cloneNonce(10), peerPub, caSig).getSw());
+    // counter = 7 (between, but < 10) -> rejected: this is exactly the alternating-nonce attack
+    assertEquals(0x6A80, cloneExport(cloneNonce(7), peerPub, caSig).getSw());
+    // counter = 10 again (equal) -> rejected
+    assertEquals(0x6A80, cloneExport(cloneNonce(10), peerPub, caSig).getSw());
+  }
+
   @Test
   @DisplayName("CLONE IMPORT round-trip: applet imports a master key sent by peer A")
   void cloneImportRoundTripTest() throws Exception {
