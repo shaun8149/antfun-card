@@ -702,42 +702,10 @@ public class KeycardTest {
   @DisplayName("GENERATE MNEMONIC command")
   @Capabilities("keyManagement")
   void generateMnemonicTest() throws Exception {
-    // Security condition violation: SecureChannel not open
-    APDUResponse response;
-
-    if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
-      response = cmdSet.generateMnemonic(4);
-      assertEquals(0x6985, response.getSw());
-      cmdSet.autoOpenSecureChannel();
-    }
-
-    // Wrong P1 (too short, too long)
-    response = cmdSet.generateMnemonic(3);
-    assertEquals(0x6A86, response.getSw());
-
-    response = cmdSet.generateMnemonic(9);
-    assertEquals(0x6A86, response.getSw());
-
-    // Good cases
-    response = cmdSet.generateMnemonic(4);
-    assertEquals(0x9000, response.getSw());
-    assertMnemonic(12, response.getData());
-
-    response = cmdSet.generateMnemonic(5);
-    assertEquals(0x9000, response.getSw());
-    assertMnemonic(15, response.getData());
-
-    response = cmdSet.generateMnemonic(6);
-    assertEquals(0x9000, response.getSw());
-    assertMnemonic(18, response.getData());
-
-    response = cmdSet.generateMnemonic(7);
-    assertEquals(0x9000, response.getSw());
-    assertMnemonic(21, response.getData());
-
-    response = cmdSet.generateMnemonic(8);
-    assertEquals(0x9000, response.getSw());
-    assertMnemonic(24, response.getData());
+    cmdSet.autoOpenSecureChannel();
+    // GENERATE MNEMONIC is disabled: this SKU never produces BIP-39 words.
+    assertEquals(0x6D00, cmdSet.generateMnemonic(4).getSw());
+    assertEquals(0x6D00, cmdSet.generateMnemonic(8).getSw());
   }
 
   @Test
@@ -1384,6 +1352,7 @@ public class KeycardTest {
   @DisplayName("Mnemonic load and derivation")
   @Tag("manual")
   void mnemonicTest() throws Exception {
+    // NOTE: GENERATE MNEMONIC / LOAD KEY(seed) are disabled on the no-mnemonic SKU; this manual test no longer reflects shipping behavior.
     if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
       cmdSet.autoOpenSecureChannel();
     }

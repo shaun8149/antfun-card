@@ -343,7 +343,8 @@ public class KeycardApplet extends Applet {
         loadKey(apdu);
         break;
       case INS_GENERATE_MNEMONIC:
-        generateMnemonic(apdu);
+        // No-mnemonic red line: this SKU never generates BIP-39 mnemonics.
+        ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
         break;
       case INS_REMOVE_KEY:
         removeKey(apdu);
