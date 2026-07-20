@@ -10,3 +10,6 @@
 /gradle.properties
 buildSrc/build
 buildSrc/.gradle
+
+# macOS
+.DS_Store
