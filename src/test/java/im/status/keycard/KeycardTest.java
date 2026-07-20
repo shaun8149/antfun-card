@@ -1311,6 +1311,49 @@ public class KeycardTest {
   }
 
   @Test
+  @DisplayName("TICKET tap-sign: persistent monotonic counter is bound into the signature")
+  void ticketTapCounterTest() throws Exception {
+    new CashCommandSet(sdkChannel).select();
+    ECParameterSpec ecSpec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    byte[] domain = "ANTFUN-TICKET-v1".getBytes();
+    byte[] challenge = "event-BKK2026|checkin".getBytes();
+
+    APDUResponse r1 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD8, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, challenge));
+    assertEquals(0x9000, r1.getSw());
+    byte[] d1 = r1.getData();
+    byte[] tskPub = Arrays.copyOfRange(d1, 0, 65);
+    int counter1 = ((d1[65] & 0xFF) << 8) | (d1[66] & 0xFF);
+    byte[] sig1 = Arrays.copyOfRange(d1, 67, d1.length);
+
+    // Cross-pollination guard: a CSK tap (0xD7) in between must NOT touch ticketCounter.
+    sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, "csk-noise".getBytes()));
+
+    APDUResponse r2 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD8, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, challenge));
+    byte[] d2 = r2.getData();
+    int counter2 = ((d2[65] & 0xFF) << 8) | (d2[66] & 0xFF);
+    assertEquals(counter1 + 1, counter2, "ticketCounter must increment by exactly 1 per ticket sign, independent of CSK taps");
+
+    ECPublicKey tskKey = (ECPublicKey) KeyFactory.getInstance("ECDSA", "BC")
+        .generatePublic(new ECPublicKeySpec(ecSpec.getCurve().decodePoint(tskPub), ecSpec));
+
+    // sig1 verifies over the pre-image bound to counter1
+    ByteArrayOutputStream ok = new ByteArrayOutputStream();
+    ok.write(domain); ok.write(challenge);
+    ok.write((counter1 >> 8) & 0xFF); ok.write(counter1 & 0xFF);
+    Signature s1 = Signature.getInstance("SHA256withECDSA", "BC");
+    s1.initVerify(tskKey); s1.update(ok.toByteArray());
+    assertTrue(s1.verify(sig1), "sig1 must verify against the pre-image bound to counter1");
+
+    // negative control: sig1 must NOT verify against a pre-image using counter2
+    ByteArrayOutputStream bad = new ByteArrayOutputStream();
+    bad.write(domain); bad.write(challenge);
+    bad.write((counter2 >> 8) & 0xFF); bad.write(counter2 & 0xFF);
+    Signature s2 = Signature.getInstance("SHA256withECDSA", "BC");
+    s2.initVerify(tskKey); s2.update(bad.toByteArray());
+    assertFalse(s2.verify(sig1), "sig1 must not verify against a pre-image built with a different counter");
+  }
+
+  @Test
   @DisplayName("Mnemonic load and derivation")
   @Tag("manual")
   void mnemonicTest() throws Exception {
