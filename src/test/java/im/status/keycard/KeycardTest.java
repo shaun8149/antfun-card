@@ -1020,13 +1020,11 @@ public class KeycardTest {
 
     // Export derived private key
     response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C, (byte) 0x80, 0x00, 0x06, 0x2D, (byte) 0x00, 0x00, 0x00, 0x00}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false);
-    assertEquals(0x6985, response.getSw());
+    assertEquals(0x6A81, response.getSw());
 
     // Export derived private key (EIP-1581 path)
     response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C, (byte) 0x80, 0x00, 0x06, 0x2D, (byte) 0x00, 0x00, 0x00, 0x00, (byte) 0x00, 0x00, 0x00, 0x00}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false);
-    assertEquals(0x9000, response.getSw());
-    keyTemplate = response.getData();
-    verifyExportedKey(keyTemplate, keyPair, chainCode, new int[] { 0x8000002b, 0x8000003c, 0x8000062d, 0x00000000, 0x00000000 }, false, false);
+    assertEquals(0x6A81, response.getSw());
 
     // Export extended public key
     response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C, (byte) 0x80, 0x00, 0x06, 0x2c, (byte) 0x00, 0x00, 0x00, 0x00}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardCommandSet.EXPORT_KEY_P2_EXTENDED_PUBLIC);
@@ -1042,6 +1040,29 @@ public class KeycardTest {
     assertEquals(0x9000, response.getSw());
     keyTemplate = response.getData();
     verifyExportedKey(keyTemplate, keyPair, sha256(chainCode), new int[] { 0x8000002b, 0x8000003c, 0x8000062c, 0x00000000 }, true, true);
+  }
+
+  @Test
+  @DisplayName("EXPORT KEY private mode is disabled (no-mnemonic red line)")
+  void exportKeyPrivateBlockedTest() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+
+    byte[] eip1581 = new byte[] {(byte) 0x80,0,0,0x2B,(byte)0x80,0,0,0x3C,(byte)0x80,0,0x06,0x2D,0,0,0,0,0,0,0,0};
+    byte[] wallet  = new byte[] {(byte) 0x80,0,0,0x2B,(byte)0x80,0,0,0x3C,(byte)0x80,0,0x06,0x2D,0,0,0,0};
+
+    // Private export blocked on EVERY path -> 0x6A81
+    assertEquals(0x6A81, cmdSet.exportKey(eip1581, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false,
+        KeycardCommandSet.EXPORT_KEY_P2_PRIVATE_AND_PUBLIC).getSw());
+    assertEquals(0x6A81, cmdSet.exportKey(wallet, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false,
+        KeycardCommandSet.EXPORT_KEY_P2_PRIVATE_AND_PUBLIC).getSw());
+
+    // Public + xpub still work
+    assertEquals(0x9000, cmdSet.exportKey(wallet, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false,
+        KeycardCommandSet.EXPORT_KEY_P2_PUBLIC_ONLY).getSw());
+    assertEquals(0x9000, cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false,
+        KeycardCommandSet.EXPORT_KEY_P2_EXTENDED_PUBLIC).getSw());
   }
 
   @Test

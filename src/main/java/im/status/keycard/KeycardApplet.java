@@ -1275,9 +1275,9 @@ public class KeycardApplet extends Applet {
 
     switch (apduBuffer[OFFSET_P2]) {
       case EXPORT_KEY_P2_PRIVATE_AND_PUBLIC:
-        publicOnly = false;
-        extendedPublic = false;
-        break;
+        // No-mnemonic red line: private key material must never leave the chip.
+        ISOException.throwIt(ISO7816.SW_FUNC_NOT_SUPPORTED);
+        return;
       case EXPORT_KEY_P2_PUBLIC_ONLY:
         publicOnly = true;
         extendedPublic = false;
