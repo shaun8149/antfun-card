@@ -1151,6 +1151,14 @@ public class KeycardApplet extends Applet {
         if (Util.arrayCompare(derivationOutput, (short) 0, apduBuffer, tagOff, CLONE_TAG_LEN) != 0) {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
+        // Anti-replay: require a strictly increasing 32-bit counter (independent of export),
+        // checked only after the tag has verified so forged/corrupt packages don't advance it.
+        if (!counterStrictlyGreater(apduBuffer, OFFSET_CDATA, importCounter)) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        JCSystem.beginTransaction();
+        Util.arrayCopy(apduBuffer, OFFSET_CDATA, importCounter, (short) 0, (short) 4);
+        JCSystem.commitTransaction();
         // 4) AES-CBC decrypt ct -> masterPriv(32) || chainCode(32) at cloneScratch[64]
         cloneAesKey.setKey(cloneScratch, (short) 32);
         cloneAesCbc.init(cloneAesKey, Cipher.MODE_DECRYPT, cloneZeroIv, (short) 0, (short) 16);
