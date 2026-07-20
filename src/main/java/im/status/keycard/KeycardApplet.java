@@ -370,7 +370,8 @@ public class KeycardApplet extends Applet {
         getChallenge(apdu);
         return;
       case INS_EXPORT_BIP85:
-        exportBIP85(apdu);
+        // No-mnemonic red line: BIP85 sub-seed export disabled on this SKU.
+        ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
         break;
       default:
         ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);

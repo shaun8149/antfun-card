@@ -1096,21 +1096,19 @@ public class KeycardTest {
   }
 
   @Test
-  @DisplayName("BIP85")
-  void bip85Test() throws Exception {    
-    byte[] expectedData = Hex.decode("efecfbccffea313214232d29e71563d941229afb4338c21f9517c41aaa0d16f00b83d2a09ef747e7a64e8e2bd5a14869e693da66ce94ac2da570ab7ee48618f7");
-
+  @DisplayName("EXPORT BIP85 is disabled (no-mnemonic red line)")
+  void exportBip85DisabledTest() throws Exception {
     cmdSet.autoOpenSecureChannel();
-    
-    APDUResponse response = cmdSet.verifyPIN("000000");
-    assertEquals(0x9000, response.getSw());
+    APDUResponse r = cmdSet.exportBIP85(64, new KeyPath("m/83696968'/0'/0'").getData());
+    assertEquals(0x6D00, r.getSw());
+  }
 
-    response = cmdSet.loadKey(new BIP32KeyPair(Hex.decode("3f15e5d852dc2e9ba5e9fe189a8dd2e1547badef5b563bbe6579fc6807d80ed9"), Hex.decode("1b67969d1ec69bdfeeae43213da8460ba34b92d0788c8f7bfcfa44906e8a589c"), null));
-    assertEquals(0x9000, response.getSw());
-
-    response = cmdSet.exportBIP85(64, new KeyPath("m/83696968'/0'/0'").getData());
-    assertEquals(0x9000, response.getSw());
-    assertArrayEquals(expectedData, response.getData());
+  @Test
+  @DisplayName("BIP85")
+  void bip85Test() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    // BIP85 export is disabled on the no-mnemonic SKU.
+    assertEquals(0x6D00, cmdSet.exportBIP85(64, new KeyPath("m/83696968'/0'/0'").getData()).getSw());
   }  
 
   @Test
