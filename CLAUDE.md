@@ -9,9 +9,11 @@ A JavaCard applet for a **no-mnemonic NFC cold wallet**, forked from
 Upstream is the `upstream` git remote; `origin` is our repo.
 
 Direction (see `docs/` for full analysis):
-- **No mnemonic.** Master key generated in-chip, never rendered as BIP-39 words.
-  `GENERATE_KEY` is the no-mnemonic path; `GENERATE_MNEMONIC` / `LOAD_KEY(SEED)` /
-  `EXPORT_BIP85` / EIP-1581 private export are to be removed on our SKU.
+- **No-mnemonic red line enforced in code.** External seed/private-key export APDUs are
+  disabled: GENERATE_MNEMONIC / external LOAD_KEY / EXPORT_LEE / EXPORT_BIP85 return
+  0x6D00; EXPORT_KEY private mode returns 0x6A81. Public/xpub export, GENERATE_KEY, and
+  the internal loadKeyPair (clone import) are retained. Regression guard:
+  KeycardTest.noMnemonicRedLineTest.
 - **Card-set clone as backup** (replaces the seed phrase). Card A verifies card B's
   DAK certificate **in-chip** (against a provisioned CA pubkey), does ephemeral
   ECDH + nonce, and transfers the 512-bit master seed under AEAD. Cross-set

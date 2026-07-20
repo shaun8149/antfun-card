@@ -1873,4 +1873,23 @@ public class KeycardTest {
     mac.init(new javax.crypto.spec.SecretKeySpec(key, "HmacSHA256"));
     return mac.doFinal(data);
   }
+
+  @Test
+  @DisplayName("No-mnemonic red line: no APDU path exports private key or injects external seed")
+  void noMnemonicRedLineTest() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+    byte[] p = new byte[] {(byte)0x80,0,0,0x2B,(byte)0x80,0,0,0x3C,(byte)0x80,0,0x06,0x2D,0,0,0,0};
+    // Disabled whole-commands -> 0x6D00
+    assertEquals(0x6D00, cmdSet.generateMnemonic(4).getSw());
+    assertEquals(0x6D00, cmdSet.loadKey(keypairGenerator().generateKeyPair()).getSw());
+    assertEquals(0x6D00, cmdSet.exportLEEKey(new byte[]{(byte)0x80,0,0,0x2B,(byte)0x80,0,0,0x3C}, KeycardApplet.DERIVE_P1_SOURCE_MASTER).getSw());
+    assertEquals(0x6D00, cmdSet.exportBIP85(64, new KeyPath("m/83696968'/0'/0'").getData()).getSw());
+    // Private export blocked -> 0x6A81; public/xpub survive
+    assertEquals(0x6A81, cmdSet.exportKey(p, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardCommandSet.EXPORT_KEY_P2_PRIVATE_AND_PUBLIC).getSw());
+    assertEquals(0x9000, cmdSet.exportKey(p, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardCommandSet.EXPORT_KEY_P2_EXTENDED_PUBLIC).getSw());
+    // On-chip generation still works
+    assertTrue(cmdSet.getKeyInitializationStatus());
+  }
 }
