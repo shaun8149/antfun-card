@@ -333,23 +333,56 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
   删除紧随其后的 `cmdSet.select()` + `verifyKeyUID(info.getKeyUID(), (ECPublicKey) keyPair.getPublic());` 三行(生成的密钥无已知公钥可比对)。保留其余(`getKeyInitializationStatus()==true`、`removeKey()==0x9000`、之后 `==false`、`getKeyUID().length==0`)。如方法内先前有 `KeyPair keyPair = ...` 且此后不再被引用,一并删除以免未使用变量告警。
 
-- [ ] **Step 8: 改造 signTest 导出段** — signTest 早段已用 `generateKey()` 装主密钥、SIGN 断言不变。导出段(约行 1004-1046)原依赖 `loadKey(keyPair,false,chainCode)` + `verifyExportedKey(..., keyPair, chainCode, ...)` 比对已知向量;LOAD_KEY 禁用后改为**自洽校验**(用同一路径的 SIGN 返回公钥 vs EXPORT_KEY 返回公钥一致)。替换整个 `if (hasKeyManagementCapability) loadKey(...)` 块到方法结尾为:
+- [ ] **Step 8: 改造 `exportKey()` 测试方法**(注意:是名为 `exportKey()` 的 EXPORT KEY 测试,**不是** `signTest()`;`signTest()` 是纯 SIGN、用 `generateKey()`、本 Task 不动它)。当前 `exportKey()` 用 `loadKey(keyPair, false, chainCode)` 灌入已知 `keyPair`/`chainCode`,再用 `verifyExportedKey(..., keyPair, chainCode, ...)` 逐条比对导出向量;LOAD_KEY 禁用后无法再注入已知钥,精确向量比对失效。改为 `generateKey()` + **自洽校验**(EXPORT_KEY 公钥 == SIGN 同路径返回的公钥)。**用下面完整方法体整体替换 `exportKey()` 方法**(保留其上的 `@Test @DisplayName("EXPORT KEY command")` 注解):
 
 ```java
-    // Master public key from EXPORT KEY must equal the public key SIGN returns for the same path.
-    APDUResponse exp = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
-    assertEquals(0x9000, exp.getSw());
-    byte[] exportedPub = extractPublicKeyFromExport(exp.getData());
+  void exportKey() throws Exception {
+    byte[] hash = sha256("some data to sign".getBytes());
+    APDUResponse response;
+
+    if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
+      // Security condition violation: SecureChannel not open
+      response = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
+      assertEquals(0x6985, response.getSw());
+      cmdSet.autoOpenSecureChannel();
+    }
+
+    if (cmdSet.getApplicationInfo().hasCredentialsManagementCapability()) {
+      // Security condition violation: PIN not verified
+      response = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
+      assertEquals(0x6985, response.getSw());
+      response = cmdSet.verifyPIN("000000");
+      assertEquals(0x9000, response.getSw());
+    }
+
+    // No-mnemonic SKU: seed is generated on-chip (external LOAD KEY disabled), so
+    // no known vector can be injected. Verify export self-consistently instead.
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+
+    // Master public export == the public key SIGN returns for the same path "m".
+    response = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
+    assertEquals(0x9000, response.getSw());
+    byte[] exportedPub = extractPublicKeyFromExport(response.getData());
     byte[] signedPub = extractPublicKeyFromSignature(cmdSet.signWithPath(hash, "m", false).getData());
     assertArrayEquals(signedPub, exportedPub);
 
-    // Public export works; private export is blocked (red line); xpub works.
-    assertEquals(0x9000, cmdSet.exportKey(new byte[] {(byte)0x80,0,0,0x2B,(byte)0x80,0,0,0x3C,(byte)0x80,0,0x06,0x2D,0,0,0,0}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true).getSw());
-    assertEquals(0x6A81, cmdSet.exportKey(new byte[] {(byte)0x80,0,0,0x2B,(byte)0x80,0,0,0x3C,(byte)0x80,0,0x06,0x2D,0,0,0,0}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false).getSw());
+    byte[] walletPath = new byte[] {(byte) 0x80,0,0,0x2B,(byte) 0x80,0,0,0x3C,(byte) 0x80,0,0x06,0x2D,0,0,0,0};
+
+    // Derived public export works.
+    assertEquals(0x9000, cmdSet.exportKey(walletPath, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true).getSw());
+
+    // Private export blocked on every path (red line).
+    assertEquals(0x6A81, cmdSet.exportKey(walletPath, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false).getSw());
+    assertEquals(0x6A81, cmdSet.exportKey(new byte[] {(byte) 0x80,0,0,0x2B,(byte) 0x80,0,0,0x3C,(byte) 0x80,0,0x06,0x2D,0,0,0,0,0,0,0,0}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false).getSw());
+
+    // Extended public (xpub) export works.
     assertEquals(0x9000, cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardCommandSet.EXPORT_KEY_P2_EXTENDED_PUBLIC).getSw());
+  }
 ```
 
-  说明:`extractPublicKeyFromSignature` 已存在(约行 1460)。需要一个 `extractPublicKeyFromExport(byte[] keyTemplate)` 辅助——若不存在则新增(解析 `TLV_KEY_TEMPLATE` → `TLV_PUB_KEY` 取值):
+  这样丢弃了原先的 `verifyExportedKey` 精确比对与 alt-PIN(`"024680"`)派生段——它们依赖 loadKey 注入的已知钥,本 SKU 已不可行。保留了红线关键覆盖:**公钥/xpub 能导 + 私钥全路径拒 + 导出公钥与签名公钥自洽**。
+
+  **新增辅助方法** `extractPublicKeyFromExport`(`extractPublicKeyFromSignature`、`sha256`、`TinyBERTLV`、`TLV_KEY_TEMPLATE`/`TLV_PUB_KEY` 均已存在于测试文件):
 
 ```java
   private byte[] extractPublicKeyFromExport(byte[] keyTemplate) {
@@ -359,7 +392,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   }
 ```
 
-  同时删除 signTest 中此后不再引用的 `keyPair`、`chainCode` 局部变量(避免未使用告警);若 `verifyExportedKey` 因此变为无引用的私有方法,保留即可(其它测试可能引用,勿删)。Task 1 已改的两处私钥断言若落在被替换区间内,以本段为准。
+  `verifyExportedKey` 私有方法若因此无人引用,保留即可(勿删)。
 
 - [ ] **Step 9: 改造 leeKeysTest** — `loadLEEKey(seed)` 内部发 INS_LOAD_KEY,现返回 0x6D00。整体替换方法体为断言禁用:
 
@@ -377,7 +410,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
   `// NOTE: relies on external LOAD KEY, disabled on the no-mnemonic SKU; manual/out-of-scope.`
 
 - [ ] **Step 11: 全量测试** — `./gradlew test --console=plain`
-  预期:除 3 个既有 jcardsim 失败外全绿。确认 `loadKeyDisabledTest`、`loadKeyTest`、`removeKeyTest`、`signTest`、`leeKeysTest`、所有 clone 测试通过。
+  预期:除 3 个既有 jcardsim 失败外全绿。确认 `loadKeyDisabledTest`、`loadKeyTest`、`removeKeyTest`、`exportKey()`、`leeKeysTest`、所有 clone 测试通过。
 
 - [ ] **Step 12: Commit**
 
