@@ -2061,4 +2061,30 @@ public class KeycardTest {
     // After reset, secretLen should be 0, so export should fail with 0x6985
     assertEquals(0x6985, cmdSet.exportSecret().getSw());
   }
+
+  @Test
+  @DisplayName("VAULT: on-card generate produces non-zero entropy, persists across reset (seed-storage SKU)")
+  void vaultGeneratePersistTest() throws Exception {
+    assumeFalse(KeycardApplet.NO_MNEMONIC, "seed-storage SKU only");
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+
+    // generate 32B entropy on-card (length in P2)
+    assertEquals(0x9000, cmdSet.storeSecret(KeycardApplet.STORE_SECRET_P1_GENERATE, 32, new byte[0]).getSw());
+    byte[] gen = cmdSet.exportSecret().getData();
+    assertEquals(32, gen.length);
+    boolean allZero = true;
+    for (byte b : gen) if (b != 0) { allZero = false; break; }
+    assertFalse(allZero, "generated entropy must not be all-zero");
+
+    // invalid generate length (P2=17) -> 0x6A86
+    assertEquals(0x6A86, cmdSet.storeSecret(KeycardApplet.STORE_SECRET_P1_GENERATE, 17, new byte[0]).getSw());
+    // still holds the previous 32B secret (rejected generate did not overwrite)
+    assertArrayEquals(gen, cmdSet.exportSecret().getData());
+
+    // persist across power-cycle: reset, re-select, re-auth, export -> same
+    resetAndSelectAndOpenSC();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertArrayEquals(gen, cmdSet.exportSecret().getData(), "entropy must persist across reset");
+  }
 }
