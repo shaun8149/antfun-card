@@ -340,7 +340,9 @@ public class KeycardApplet extends Applet {
         unblockPIN(apdu);
         break;
       case INS_LOAD_KEY:
-        loadKey(apdu);
+        // No-mnemonic red line: external key/seed injection disabled.
+        // Internal loadKeyPair() is retained for the DAK-authenticated clone import path.
+        ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
         break;
       case INS_GENERATE_MNEMONIC:
         // No-mnemonic red line: this SKU never generates BIP-39 mnemonics.

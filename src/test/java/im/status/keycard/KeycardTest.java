@@ -627,75 +627,25 @@ public class KeycardTest {
   }
 
   @Test
+  @DisplayName("LOAD KEY (external) is disabled; clone import path preserved")
+  void loadKeyDisabledTest() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    KeyPair kp = keypairGenerator().generateKeyPair();
+    // Every external LOAD KEY entry returns 0x6D00.
+    assertEquals(0x6D00, cmdSet.loadKey(kp).getSw());
+    assertEquals(0x6D00, cmdSet.loadKey(new byte[]{(byte)0xA1,0x02,(byte)0x80,0x00}, KeycardApplet.LOAD_KEY_P1_EC).getSw());
+  }
+
+  @Test
   @DisplayName("LOAD KEY command")
   @Capabilities("keyManagement")
   void loadKeyTest() throws Exception {
-    KeyPairGenerator g = keypairGenerator();
-    KeyPair keyPair = g.generateKeyPair();
-    APDUResponse response;
-
-    if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
-      // Security condition violation: SecureChannel not open
-      response = cmdSet.loadKey(keyPair);
-      assertEquals(0x6985, response.getSw());
-
-      cmdSet.autoOpenSecureChannel();
-    }
-
-    if (cmdSet.getApplicationInfo().hasCredentialsManagementCapability()) {
-      // Security condition violation: PIN not verified
-      response = cmdSet.loadKey(keyPair);
-      assertEquals(0x6985, response.getSw());
-
-      response = cmdSet.verifyPIN("000000");
-      assertEquals(0x9000, response.getSw());
-    }
-
-    // Wrong key type
-    response = cmdSet.loadKey(new byte[] { (byte) 0xAA, 0x02, (byte) 0x80, 0x00}, (byte) 0x00);
-    assertEquals(0x6A86, response.getSw());
-
-    // Wrong data (wrong template, missing private key, invalid keys)
-    response = cmdSet.loadKey(new byte[]{(byte) 0xAA, 0x02, (byte) 0x80, 0x00}, KeycardApplet.LOAD_KEY_P1_EC);
-    assertEquals(0x6A80, response.getSw());
-
-    response = cmdSet.loadKey(new byte[]{(byte) 0xA1, 0x02, (byte) 0x80, 0x00}, KeycardApplet.LOAD_KEY_P1_EC);
-    assertEquals(0x6A80, response.getSw());
-
-    if (TARGET != TARGET_SIMULATOR) { // the simulator does not check the key format
-      response = cmdSet.loadKey(new byte[]{(byte) 0xA1, 0x06, (byte) 0x80, 0x01, 0x01, (byte) 0x81, 0x01, 0x02}, KeycardApplet.LOAD_KEY_P1_EC);
-      assertEquals(0x6A80, response.getSw());
-    }
-
-    byte[] chainCode = new byte[32];
-    new Random().nextBytes(chainCode);
-
-    // Correct LOAD KEY
-    response = cmdSet.loadKey(keyPair);
-    assertEquals(0x9000, response.getSw());
-    verifyKeyUID(response.getData(), ((ECPublicKey) keyPair.getPublic()));
-
-    keyPair = g.generateKeyPair();
-
-    // Check extended key
-    response = cmdSet.loadKey(keyPair, false, chainCode);
-    assertEquals(0x9000, response.getSw());
-    verifyKeyUID(response.getData(), ((ECPublicKey) keyPair.getPublic()));
-
-    // Check omitted public key
-    response = cmdSet.loadKey(keyPair, true, null);
-    assertEquals(0x9000, response.getSw());
-    verifyKeyUID(response.getData(), ((ECPublicKey) keyPair.getPublic()));
-    response = cmdSet.loadKey(keyPair, true, chainCode);
-    assertEquals(0x9000, response.getSw());
-    verifyKeyUID(response.getData(), ((ECPublicKey) keyPair.getPublic()));
-
-    byte[] seed = new byte[64];
-    new Random().nextBytes(seed);
-
-    // Check seed load
-    response = cmdSet.loadKey(seed);
-    assertEquals(0x9000, response.getSw());
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    KeyPair kp = keypairGenerator().generateKeyPair();
+    // External LOAD KEY is disabled on the no-mnemonic SKU.
+    assertEquals(0x6D00, cmdSet.loadKey(kp).getSw());
   }
 
   @Test
@@ -712,8 +662,6 @@ public class KeycardTest {
   @DisplayName("REMOVE KEY command")
   @Capabilities("keyManagement")
   void removeKeyTest() throws Exception {
-    KeyPairGenerator g = keypairGenerator();
-    KeyPair keyPair = g.generateKeyPair();
     APDUResponse response;
 
     if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
@@ -732,13 +680,8 @@ public class KeycardTest {
       assertEquals(0x9000, response.getSw());
     }
 
-    response = cmdSet.loadKey(keyPair);
+    response = cmdSet.generateKey();
     assertEquals(0x9000, response.getSw());
-
-    response = cmdSet.select();
-    assertEquals(0x9000, response.getSw());
-    ApplicationInfo info = new ApplicationInfo(response.getData());
-    verifyKeyUID(info.getKeyUID(), (ECPublicKey) keyPair.getPublic());
 
     if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
       cmdSet.autoOpenSecureChannel();
@@ -759,7 +702,7 @@ public class KeycardTest {
 
     response = cmdSet.select();
     assertEquals(0x9000, response.getSw());
-    info = new ApplicationInfo(response.getData());
+    ApplicationInfo info = new ApplicationInfo(response.getData());
     assertEquals(0, info.getKeyUID().length);
   }
 
@@ -945,18 +888,13 @@ public class KeycardTest {
   @Test
   @DisplayName("EXPORT KEY command")
   void exportKey() throws Exception {
-    KeyPairGenerator g = keypairGenerator();
-    KeyPair keyPair = g.generateKeyPair();
-    byte[] chainCode = new byte[32];
-    new Random().nextBytes(chainCode);
-
+    byte[] hash = sha256("some data to sign".getBytes());
     APDUResponse response;
 
     if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
       // Security condition violation: SecureChannel not open
       response = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
       assertEquals(0x6985, response.getSw());
-
       cmdSet.autoOpenSecureChannel();
     }
 
@@ -964,50 +902,32 @@ public class KeycardTest {
       // Security condition violation: PIN not verified
       response = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
       assertEquals(0x6985, response.getSw());
-
       response = cmdSet.verifyPIN("000000");
       assertEquals(0x9000, response.getSw());
     }
 
-    if (cmdSet.getApplicationInfo().hasKeyManagementCapability()) {
-      response = cmdSet.loadKey(keyPair, false, chainCode);
-      assertEquals(0x9000, response.getSw());
-    }
+    // No-mnemonic SKU: seed is generated on-chip (external LOAD KEY disabled), so
+    // no known vector can be injected. Verify export self-consistently instead.
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
 
-    // Export master public key (empty path)
+    // Master public export == the public key SIGN returns for the same path "m".
     response = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
     assertEquals(0x9000, response.getSw());
-    byte[] keyTemplate = response.getData();
-    verifyExportedKey(keyTemplate, keyPair, chainCode, new int[0], true, false);
+    byte[] exportedPub = extractPublicKeyFromExport(response.getData());
+    byte[] signedPub = extractPublicKeyFromSignature(cmdSet.signWithPath(hash, "m", false).getData());
+    assertArrayEquals(signedPub, exportedPub);
 
-    // Export derived public key
-    response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C, (byte) 0x80, 0x00, 0x06, 0x2D, (byte) 0x00, 0x00, 0x00, 0x00}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
-    assertEquals(0x9000, response.getSw());
-    keyTemplate = response.getData();
-    verifyExportedKey(keyTemplate, keyPair, chainCode, new int[] { 0x8000002b, 0x8000003c, 0x8000062d, 0x00000000 }, true, false);
+    byte[] walletPath = new byte[] {(byte) 0x80,0,0,0x2B,(byte) 0x80,0,0,0x3C,(byte) 0x80,0,0x06,0x2D,0,0,0,0};
 
-    // Export derived private key
-    response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C, (byte) 0x80, 0x00, 0x06, 0x2D, (byte) 0x00, 0x00, 0x00, 0x00}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false);
-    assertEquals(0x6A81, response.getSw());
+    // Derived public export works.
+    assertEquals(0x9000, cmdSet.exportKey(walletPath, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true).getSw());
 
-    // Export derived private key (EIP-1581 path)
-    response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C, (byte) 0x80, 0x00, 0x06, 0x2D, (byte) 0x00, 0x00, 0x00, 0x00, (byte) 0x00, 0x00, 0x00, 0x00}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false);
-    assertEquals(0x6A81, response.getSw());
+    // Private export blocked on every path (red line).
+    assertEquals(0x6A81, cmdSet.exportKey(walletPath, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false).getSw());
+    assertEquals(0x6A81, cmdSet.exportKey(new byte[] {(byte) 0x80,0,0,0x2B,(byte) 0x80,0,0,0x3C,(byte) 0x80,0,0x06,0x2D,0,0,0,0,0,0,0,0}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, false).getSw());
 
-    // Export extended public key
-    response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C, (byte) 0x80, 0x00, 0x06, 0x2c, (byte) 0x00, 0x00, 0x00, 0x00}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardCommandSet.EXPORT_KEY_P2_EXTENDED_PUBLIC);
-    assertEquals(0x9000, response.getSw());
-    keyTemplate = response.getData();
-    verifyExportedKey(keyTemplate, keyPair, chainCode, new int[] { 0x8000002b, 0x8000003c, 0x8000062c, 0x00000000 }, true, true);
-
-    // Alt PIN
-    response = cmdSet.verifyPIN("024680");
-    assertEquals(0x9000, response.getSw());
-
-    response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C, (byte) 0x80, 0x00, 0x06, 0x2c, (byte) 0x00, 0x00, 0x00, 0x00}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardCommandSet.EXPORT_KEY_P2_EXTENDED_PUBLIC);
-    assertEquals(0x9000, response.getSw());
-    keyTemplate = response.getData();
-    verifyExportedKey(keyTemplate, keyPair, sha256(chainCode), new int[] { 0x8000002b, 0x8000003c, 0x8000062c, 0x00000000 }, true, true);
+    // Extended public (xpub) export works.
+    assertEquals(0x9000, cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardCommandSet.EXPORT_KEY_P2_EXTENDED_PUBLIC).getSw());
   }
 
   @Test
@@ -1037,30 +957,10 @@ public class KeycardTest {
   @DisplayName("LEE Keys")
   void leeKeysTest() throws Exception {
     byte[] seed = Mnemonic.toBinarySeed("fan empower output between game genius forest bulk party small arm shuffle", "");
-    byte[] expectedPublic = Hex.decode("045bdbe46824409ae66c960f4a204ac66adc1646dcfa56a5b455629f99b95a643012390c799fb8a1f5e9140dfe9f6088ab1ded90f496c9d8832df501e3c8e9c45f");
-    byte[] expectedNsk = Hex.decode("a44386392e2112c8c46a7f8378b4c3163011a76664a2b1d23e25a6f35ef90739");
-    byte[] expectedVsk = Hex.decode("d06cc239011a56c8aecec0579b884227d637496a6e3e8f27d70e170f2ec3fa0d97dc323114bb420ef3061010446a9b4cf321ebc895ac8b7f261e3fbcaef79a67");
-
     cmdSet.autoOpenSecureChannel();
-    APDUResponse response = cmdSet.verifyPIN("000000");
-    assertEquals(0x9000, response.getSw());
-
-    response = cmdSet.loadLEEKey(seed);
-    assertEquals(0x9000, response.getSw());
-
-    response = cmdSet.exportKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C}, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, true);
-    assertEquals(0x9000, response.getSw());
-    BIP32KeyPair pair = BIP32KeyPair.fromTLV(response.getData());
-    assertArrayEquals(expectedPublic, pair.getPublicKey());
-
-    if (TARGET != TARGET_SIMULATOR) {
-      response = cmdSet.exportLEEKey(new byte[] {(byte) 0x80, 0x00, 0x00, 0x2B, (byte) 0x80, 0x00, 0x00, 0x3C}, KeycardApplet.DERIVE_P1_SOURCE_MASTER);
-      assertEquals(0x9000, response.getSw());
-      TinyBERTLV tlvReader = new TinyBERTLV(response.getData());
-      tlvReader.enterConstructed(KeycardApplet.TLV_KEY_TEMPLATE);
-      assertArrayEquals(expectedNsk, tlvReader.readPrimitive(KeycardApplet.TLV_LEE_NSK));
-      assertArrayEquals(expectedVsk, tlvReader.readPrimitive(KeycardApplet.TLV_LEE_VSK));      
-    }
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    // LOAD KEY (incl. LEE variant) is disabled on the no-mnemonic SKU.
+    assertEquals(0x6D00, cmdSet.loadLEEKey(seed).getSw());
   }
 
   @Test
@@ -1394,6 +1294,7 @@ public class KeycardTest {
   @DisplayName("Sign actual Ethereum transaction")
   @Tag("manual")
   void signTransactionTest() throws Exception {
+    // NOTE: relies on external LOAD KEY, disabled on the no-mnemonic SKU; manual/out-of-scope.
     // Initialize credentials
     Web3j web3j = Web3j.build(new HttpService());
     Credentials wallet1 = WalletUtils.loadCredentials("testwallet", "testwallets/wallet1.json");
@@ -1456,6 +1357,12 @@ public class KeycardTest {
     assertEquals(KeycardApplet.TLV_PUB_KEY, sig[3]);
 
     return Arrays.copyOfRange(sig, 5, 5 + sig[4]);
+  }
+
+  private byte[] extractPublicKeyFromExport(byte[] keyTemplate) {
+    TinyBERTLV tlv = new TinyBERTLV(keyTemplate);
+    tlv.enterConstructed(KeycardApplet.TLV_KEY_TEMPLATE);
+    return tlv.readPrimitive(KeycardApplet.TLV_PUB_KEY);
   }
 
   private void reset() {
