@@ -62,6 +62,8 @@ private boolean counterStrictlyGreater(byte[] buf, short off, byte[] stored)
 
 **不变的前提**:clone 仍要求物理持卡 + PIN + CA 验证书 + ECDH + AEAD;本加固只收紧"同一方向的重放次数"。
 
+> **注意(计数器不是限频)**:EXPORT 计数器是纵深防御,不是抽取上限——已持卡 + PIN + 有效 CA 验证书的攻击者仍可用**递增** counter 重复导出(每次 ephemeral 不同、包也不同)。EXPORT 的真正边界仍是 **PIN + 在片证书验证**;计数器只杀"重放旧值"(交替攻击)。IMPORT 计数器在 `loadKeyPair` 之前推进——若之后失败会烧掉该值(合法方需用更高 counter 重发),不启用任何重放,仅为可用性细节。
+
 ## 五、共存 / 不碰
 
 不动:CA 在片验证、ECDH、HKDF、AEAD、tag、`loadKeyPair`、PIN 门;CSK/票/红线全不动。仅在 EXPORT/IMPORT 两处入口加计数器门 + 替换 `lastCloneNonce` 字段。
