@@ -2054,6 +2054,10 @@ public class KeycardTest {
     cmdSet.autoOpenSecureChannel();
     assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
 
+    // NOTE: black-box limitation — exportSecret() is gated by secretLen, so this test
+    // verifies the export gate re-engages after factory reset (secretLen == 0). The
+    // byte-level wipe of secretStore (Util.arrayFillNonAtomic in factoryReset()) cannot
+    // be observed via APDU and is verified by code review, not this assertion.
     // After reset, secretLen should be 0, so export should fail with 0x6985
     assertEquals(0x6985, cmdSet.exportSecret().getSw());
   }
