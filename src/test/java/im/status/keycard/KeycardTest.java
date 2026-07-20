@@ -1860,6 +1860,51 @@ public class KeycardTest {
     assertEquals(0x6A80, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in)).getSw());
   }
 
+  private byte[] cloneNonce(int c) {
+    byte[] n = new byte[16];
+    n[0] = (byte) ((c >> 24) & 0xFF); n[1] = (byte) ((c >> 16) & 0xFF);
+    n[2] = (byte) ((c >> 8) & 0xFF);  n[3] = (byte) (c & 0xFF);
+    for (int i = 4; i < 16; i++) n[i] = (byte) i; // fixed low bytes
+    return n;
+  }
+
+  private APDUResponse cloneExport(byte[] nonce, byte[] peerPub, byte[] caSig) throws Exception {
+    byte[] in = new byte[16 + peerPub.length + caSig.length];
+    System.arraycopy(nonce, 0, in, 0, 16);
+    System.arraycopy(peerPub, 0, in, 16, peerPub.length);
+    System.arraycopy(caSig, 0, in, 16 + peerPub.length, caSig.length);
+    return sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x02, 0x00, in));
+  }
+
+  @Test
+  @DisplayName("CLONE EXPORT: reject a non-increasing counter (blocks alternating-nonce replay)")
+  void cloneExportRejectsNonMonotonicCounterTest() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+    byte[] caPubBytes = ((ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(false);
+    assertEquals(0x9000, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x00, 0x00, caPubBytes)).getSw());
+
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    KeyFactory kf = KeyFactory.getInstance("EC", "BC");
+    BigInteger bPriv = new BigInteger("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", 16);
+    byte[] peerPub = ((ECPublicKey) kf.generatePublic(
+        new org.bouncycastle.jce.spec.ECPublicKeySpec(spec.getG().multiply(bPriv), spec))).getQ().getEncoded(false);
+    Signature caSigner = Signature.getInstance("SHA256withECDSA", "BC");
+    caSigner.initSign(caKeyPair.getPrivate());
+    caSigner.update(peerPub);
+    byte[] caSig = caSigner.sign();
+
+    // counter = 5 -> OK
+    assertEquals(0x9000, cloneExport(cloneNonce(5), peerPub, caSig).getSw());
+    // counter = 10 -> OK (strictly greater)
+    assertEquals(0x9000, cloneExport(cloneNonce(10), peerPub, caSig).getSw());
+    // counter = 7 (between, but < 10) -> rejected: this is exactly the alternating-nonce attack
+    assertEquals(0x6A80, cloneExport(cloneNonce(7), peerPub, caSig).getSw());
+    // counter = 10 again (equal) -> rejected
+    assertEquals(0x6A80, cloneExport(cloneNonce(10), peerPub, caSig).getSw());
+  }
+
   @Test
   @DisplayName("CLONE IMPORT round-trip: applet imports a master key sent by peer A")
   void cloneImportRoundTripTest() throws Exception {
@@ -1952,6 +1997,81 @@ public class KeycardTest {
     cmdSet.autoOpenSecureChannel();
     assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
     assertEquals(0x6A80, sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x03, 0x00, in)).getSw());
+  }
+
+  /**
+   * Builds a cryptographically valid CLONE_P1_IMPORT package (nonce(16) || e_A_pub(65) || ct(64) || tag(16))
+   * carrying a fixed known master key, with the nonce's high 4 bytes set to {@code counter}
+   * (via {@link #cloneNonce(int)}). Modeled on {@code cloneImportRoundTripTest}.
+   */
+  private byte[] buildImportPackage(int counter) throws Exception {
+    ECParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+
+    byte[] masterPriv = new byte[32];
+    byte[] chainCode = new byte[32];
+    for (int i = 0; i < 32; i++) { masterPriv[i] = (byte) (0x11 + i); chainCode[i] = (byte) (0x80 + i); }
+    byte[] seed = new byte[64];
+    System.arraycopy(masterPriv, 0, seed, 0, 32);
+    System.arraycopy(chainCode, 0, seed, 32, 32);
+
+    // Peer A ephemeral key; ECDH against the applet's device PUBLIC key (test knows identKeyPair)
+    BigInteger aEph = new BigInteger("0a0b0c0d0e0f000102030405060708090a0b0c0d0e0f00010203040506070809", 16);
+    byte[] aEphPub = spec.getG().multiply(aEph).normalize().getEncoded(false);
+    org.bouncycastle.jce.interfaces.ECPublicKey devPub = (org.bouncycastle.jce.interfaces.ECPublicKey) identKeyPair.getPublic();
+    org.bouncycastle.math.ec.ECPoint shared = devPub.getQ().multiply(aEph).normalize();
+    byte[] x = Numeric.toBytesPadded(shared.getAffineXCoord().toBigInteger(), 32);
+
+    byte[] nonce = cloneNonce(counter);
+    byte[] okm = hkdfSha256(nonce, x, "ANTFUN-CLONE-v1".getBytes(), 32);
+    byte[] encKey = Arrays.copyOfRange(okm, 0, 16);
+    byte[] macKey = Arrays.copyOfRange(okm, 16, 32);
+
+    javax.crypto.Cipher aes = javax.crypto.Cipher.getInstance("AES/CBC/NoPadding", "BC");
+    aes.init(javax.crypto.Cipher.ENCRYPT_MODE, new javax.crypto.spec.SecretKeySpec(encKey, "AES"),
+             new javax.crypto.spec.IvParameterSpec(new byte[16]));
+    byte[] ct = aes.doFinal(seed);
+    byte[] tag = Arrays.copyOfRange(hmacSha256(macKey, ct), 0, 16);
+
+    byte[] in = new byte[16 + 65 + 64 + 16];
+    System.arraycopy(nonce, 0, in, 0, 16);
+    System.arraycopy(aEphPub, 0, in, 16, 65);
+    System.arraycopy(ct, 0, in, 81, 64);
+    System.arraycopy(tag, 0, in, 145, 16);
+    return in;
+  }
+
+  private APDUResponse cloneImport(byte[] pkg) throws Exception {
+    return sdkChannel.send(new APDUCommand(0x80, (byte) 0xD6, 0x03, 0x00, pkg));
+  }
+
+  @Test
+  @DisplayName("CLONE IMPORT: reject replay of a valid package; accept a higher-counter package")
+  void cloneImportRejectsReplayTest() throws Exception {
+    byte[] pkgA = buildImportPackage(3);
+    byte[] pkgB = buildImportPackage(4);
+
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+
+    assertEquals(0x9000, cloneImport(pkgA).getSw());     // first import OK
+    assertEquals(0x6A80, cloneImport(pkgA).getSw());     // same package again -> replay rejected
+    assertEquals(0x9000, cloneImport(pkgB).getSw());     // higher counter -> OK
+  }
+
+  @Test
+  @DisplayName("CLONE IMPORT: counter persists across reset")
+  void cloneImportCounterPersistsTest() throws Exception {
+    byte[] pkg7 = buildImportPackage(7);
+    byte[] pkg8 = buildImportPackage(8);
+
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cloneImport(pkg7).getSw());
+
+    resetAndSelectAndOpenSC();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x6A80, cloneImport(pkg7).getSw());      // same counter after reset -> rejected (persisted)
+    assertEquals(0x9000, cloneImport(pkg8).getSw());      // higher -> OK
   }
 
   private static byte[] hkdfSha256(byte[] salt, byte[] ikm, byte[] info, int len) throws Exception {
