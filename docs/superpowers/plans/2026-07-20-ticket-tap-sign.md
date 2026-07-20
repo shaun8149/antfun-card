@@ -202,10 +202,13 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
     int counter1 = ((d1[65] & 0xFF) << 8) | (d1[66] & 0xFF);
     byte[] sig1 = Arrays.copyOfRange(d1, 67, d1.length);
 
+    // Cross-pollination guard: a CSK tap (0xD7) in between must NOT touch ticketCounter.
+    sdkChannel.send(new APDUCommand(0x80, (byte) 0xD7, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, "csk-noise".getBytes()));
+
     APDUResponse r2 = sdkChannel.send(new APDUCommand(0x80, (byte) 0xD8, 0x00, KeycardCommandSet.SIGN_P2_ECDSA, challenge));
     byte[] d2 = r2.getData();
     int counter2 = ((d2[65] & 0xFF) << 8) | (d2[66] & 0xFF);
-    assertTrue(counter2 > counter1, "ticket counter must strictly increase");
+    assertEquals(counter1 + 1, counter2, "ticketCounter must increment by exactly 1 per ticket sign, independent of CSK taps");
 
     ECPublicKey tskKey = (ECPublicKey) KeyFactory.getInstance("ECDSA", "BC")
         .generatePublic(new ECPublicKeySpec(ecSpec.getCurve().decodePoint(tskPub), ecSpec));
