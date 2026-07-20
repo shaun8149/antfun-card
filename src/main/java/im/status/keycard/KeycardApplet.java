@@ -16,6 +16,8 @@ import static javacard.framework.ISO7816.OFFSET_P2;
 public class KeycardApplet extends Applet {
   static final short APPLICATION_VERSION = (short) 0x0400;
 
+  public static final boolean NO_MNEMONIC = false; // seed-storage SKU build (true = no-mnemonic cold-wallet)
+
   static final byte INS_GET_STATUS = (byte) 0xF2;
   static final byte INS_INIT = (byte) 0xFE;
   static final byte INS_FACTORY_RESET = (byte) 0xFD;
@@ -36,6 +38,11 @@ public class KeycardApplet extends Applet {
   static final byte INS_STORE_DATA = (byte) 0xE2;
   static final byte INS_GET_CHALLENGE = (byte) 0x84;
   static final byte INS_CLONE = (byte) 0xD6;
+  static final byte INS_STORE_SECRET = (byte) 0xDA;
+  static final byte INS_EXPORT_SECRET = (byte) 0xDB;
+  static final byte STORE_SECRET_P1_IMPORT = (byte) 0x00;
+  static final byte STORE_SECRET_P1_GENERATE = (byte) 0x01;
+  static final short SECRET_MAX_LEN = 32;
 
   static final byte CLONE_P1_SET_CA = 0x00;
   static final byte CLONE_P1_VERIFY_PEER = 0x01;
@@ -171,6 +178,9 @@ public class KeycardApplet extends Applet {
 
   private byte[] derivationOutput;
 
+  private byte[] secretStore;
+  private short secretLen;
+
   private byte[] data;
 
   /**
@@ -232,6 +242,9 @@ public class KeycardApplet extends Applet {
     // BIP32: secret_key (32) + chain_code (32) = 64
     // LEE:   NSK (32) + VSK (64) = 96
     derivationOutput = JCSystem.makeTransientByteArray((short) (Crypto.KEY_SECRET_SIZE + Crypto.LEE_VSK_SIZE), JCSystem.CLEAR_ON_DESELECT);
+
+    secretStore = new byte[SECRET_MAX_LEN];
+    secretLen = 0;
 
     data = new byte[(short)(MAX_DATA_LENGTH + 1)];
 
@@ -376,6 +389,14 @@ public class KeycardApplet extends Applet {
       case INS_EXPORT_BIP85:
         // No-mnemonic red line: BIP85 sub-seed export disabled on this SKU.
         ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
+        break;
+      case INS_STORE_SECRET:
+        if (NO_MNEMONIC) ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
+        storeSecret(apdu);
+        break;
+      case INS_EXPORT_SECRET:
+        if (NO_MNEMONIC) ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
+        exportSecret(apdu);
         break;
       default:
         ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
@@ -1164,6 +1185,8 @@ public class KeycardApplet extends Applet {
     puk = null;
     secureChannel.reset();
     Util.arrayFillNonAtomic(data, (short) 0, (short) data.length, (byte) 0);
+    Util.arrayFillNonAtomic(secretStore, (short) 0, SECRET_MAX_LEN, (byte) 0);
+    secretLen = 0;
 
     if (JCSystem.isObjectDeletionSupported()) {
       JCSystem.requestObjectDeletion();
@@ -1569,6 +1592,54 @@ public class KeycardApplet extends Applet {
     }
 
     return true;
+  }
+
+  private void storeSecret(APDU apdu) {
+    byte[] apduBuffer = apdu.getBuffer();
+    if (!pin.isValidated()) {
+      ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+    }
+    short len;
+    switch (apduBuffer[OFFSET_P1]) {
+      case STORE_SECRET_P1_IMPORT:
+        len = Util.makeShort((byte) 0x00, apduBuffer[ISO7816.OFFSET_LC]);
+        if (!isValidEntropyLen(len)) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        JCSystem.beginTransaction();
+        Util.arrayCopy(apduBuffer, ISO7816.OFFSET_CDATA, secretStore, (short) 0, len);
+        secretLen = len;
+        JCSystem.commitTransaction();
+        break;
+      case STORE_SECRET_P1_GENERATE:
+        len = Util.makeShort((byte) 0x00, apduBuffer[OFFSET_P2]);
+        if (!isValidEntropyLen(len)) {
+          ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+        }
+        JCSystem.beginTransaction();
+        crypto.random.generateData(secretStore, (short) 0, len);
+        secretLen = len;
+        JCSystem.commitTransaction();
+        break;
+      default:
+        ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+    }
+  }
+
+  private void exportSecret(APDU apdu) {
+    byte[] apduBuffer = apdu.getBuffer();
+    if (!pin.isValidated()) {
+      ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+    }
+    if (secretLen == 0) {
+      ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+    }
+    Util.arrayCopyNonAtomic(secretStore, (short) 0, apduBuffer, ISO7816.OFFSET_CDATA, secretLen);
+    secureChannel.respond(apdu, secretLen, ISO7816.SW_NO_ERROR);
+  }
+
+  private boolean isValidEntropyLen(short len) {
+    return len == 16 || len == 20 || len == 24 || len == 28 || len == 32;
   }
 
   /**
