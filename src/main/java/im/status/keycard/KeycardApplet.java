@@ -359,7 +359,8 @@ public class KeycardApplet extends Applet {
         exportKey(apdu);
         break;
       case INS_EXPORT_LEE:
-        exportLee(apdu);
+        // No-mnemonic red line: EIP-1581 private key export disabled.
+        ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
         break;
       case INS_GET_DATA:
         getData(apdu);

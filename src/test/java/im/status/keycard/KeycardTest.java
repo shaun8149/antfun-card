@@ -1064,6 +1064,15 @@ public class KeycardTest {
   }
 
   @Test
+  @DisplayName("EXPORT LEE is disabled (no-mnemonic red line)")
+  void exportLeeDisabledTest() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    APDUResponse r = cmdSet.exportLEEKey(new byte[] {(byte) 0x80,0,0,0x2B,(byte)0x80,0,0,0x3C}, KeycardApplet.DERIVE_P1_SOURCE_MASTER);
+    assertEquals(0x6D00, r.getSw());
+  }
+
+  @Test
   @DisplayName("EXPORT BIP85 is disabled (no-mnemonic red line)")
   void exportBip85DisabledTest() throws Exception {
     cmdSet.autoOpenSecureChannel();
